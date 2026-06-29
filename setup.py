@@ -19,7 +19,8 @@ setup(
         "console_scripts": [
             "imagemutate=cli_scripts.imagemutate:run",
             "imagereplay=cli_scripts.imagereplay:run",
-            "imagemerge=cli_scripts.imagemerge:run"
+            "imagemerge=cli_scripts.imagemerge:run",
+            "imagephase=cli_scripts.imagephase:run"
         ]
     },
     install_requires=[
