@@ -19,14 +19,14 @@ import shutil
 import subprocess
 
 import pytest
+from PIL import Image
 
 
 def _make_solid_png(path, hex_color, size):
-    subprocess.run(
-        ["magick", "-size", f"{size}x{size}", f"xc:{hex_color}",
-         "-define", "png:color-type=2", str(path)],
-        check=True,
-    )
+    """Write a solid-color sRGB RGB PNG. Pillow's RGB mode = 24-bit
+    (png color-type 2), which pygame.transform.smoothscale requires."""
+    img = Image.new("RGB", (size, size), hex_color)
+    img.save(str(path), "PNG")
 
 
 def test_brush_sample_range_no_longer_crashes(tmp_path):
@@ -35,8 +35,6 @@ def test_brush_sample_range_no_longer_crashes(tmp_path):
     completes."""
     if shutil.which("imagemutate") is None:
         pytest.skip("imagemutate not on PATH; install with `pip install -e .`")
-    if shutil.which("magick") is None:
-        pytest.skip("ImageMagick `magick` not on PATH")
 
     target = tmp_path / "target.png"
     brush = tmp_path / "brush.png"
