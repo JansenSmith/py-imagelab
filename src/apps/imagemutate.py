@@ -3,6 +3,7 @@
 Produce a target image by randomly mutating a base canvas
 """
 import json
+import sys
 import time
 import datetime
 import pygame
@@ -267,6 +268,35 @@ class App:
         )
         self.target_surface.convert(self.bit_depth)
 
+        # F2: --start-canvas (-s) was already declared in argparse but never
+        # wired up. If supplied, load it now (after target loads so we can
+        # validate dimensions) and stash for evolve_image_mode.
+        self.start_canvas_surface = None
+        start_canvas_path = self.options.get('start_canvas')
+        if start_canvas_path:
+            self.print(f"loading start canvas: {start_canvas_path}")
+            try:
+                loaded = pygame.image.load(start_canvas_path)
+            except (FileNotFoundError, pygame.error) as exc:
+                print(
+                    f"error: could not load --start-canvas "
+                    f"{start_canvas_path!r}: {exc}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if loaded.get_size() != self.target_surface.get_size():
+                print(
+                    f"error: --start-canvas dimension mismatch. "
+                    f"target is {self.target_surface.get_size()}, "
+                    f"start-canvas is {loaded.get_size()}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            # convert() returns a new surface in the canvas's pixel format
+            # (matches what get_new_surface produces). Handles grayscale →
+            # RGB coercion cleanly.
+            self.start_canvas_surface = loaded.convert(self.bit_depth)
+
         if(self.options.get('brush_images')):
             self.print(
                 f"loading brush images {self.options.get('brush_images')}"
@@ -309,10 +339,15 @@ class App:
 
     def evolve_image_mode(self):
         self.print("starting image evolution")
-        canvas_surface = get_new_surface(
-            self.target_surface.get_rect().size,
-            self.display_bg_color
-        )
+        if self.start_canvas_surface is not None:
+            # User supplied --start-canvas; use a copy so the original
+            # surface is preserved if the App is re-run (multi-run flag).
+            canvas_surface = self.start_canvas_surface.copy()
+        else:
+            canvas_surface = get_new_surface(
+                self.target_surface.get_rect().size,
+                self.display_bg_color
+            )
         self.evolve(canvas_surface)
 
     def evolve_movie_mode(self):
