@@ -6,6 +6,7 @@ import json
 import time
 import datetime
 import pygame
+import pygame.freetype  # explicit submodule import — pygame ≥2.6 does not auto-load freetype
 import os
 import cv2
 import multiprocessing
