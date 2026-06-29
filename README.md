@@ -97,6 +97,69 @@ imagemutate sample/images/fox-720x1080.jpg -d output -r 150 -c 100 -g 1000 -i
 imagemutate sample/images/fox-720x1080.jpg -d output -r 150 -c 100 -g 1000 -j 8 --adaptive-cheat-mode
 ```
 
+### imagephase
+
+A sibling app to `imagemutate` that paints in **phases** — one brush per phase, advance to next phase on plateau-then-switch. Different paradigm from imagemutate's uniform-random brush selection: instead of mixing all brushes throughout the run, each phase uses a single brush until the match percentage stops improving meaningfully, then moves on.
+
+Useful for any workflow where painting proceeds in distinct color stages — for example, FDM 3D-printing simulation, where each phase corresponds to one printed layer's blended color, and the painted output approximates what the multi-color stack will physically render.
+
+```bash
+imagephase <target_path> --start-canvas <seed.png> --phases N --phase-brushes p1.png ... pN.png [options]
+```
+
+**Required flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--phases N` | Number of phases (>=1). |
+| `--phase-brushes p1.png p2.png ... pN.png` | One brush per phase, space-separated. Parallel list of length `--phases`. |
+| `-s` / `--start-canvas` | Seed image to start evolution from. Phase mode requires this — phase 0 paints over this canvas, not the default solid bg. |
+
+**Phase-specific options:**
+
+| Flag | Description |
+|------|-------------|
+| `--phase-max-radius R1 R2 ... Rn` | Per-phase starting (max) radius. Default 40 per phase. |
+| `--phase-min-radius R1 R2 ... Rn` | Per-phase adaptive-shrink floor. Default 5 per phase. |
+| `--phase-max-gens G1 G2 ... Gn` | EXPERIMENTAL per-phase safety cap. Use `inf` for no cap. Default `inf` per phase. |
+| `--plateau-window K` | EXPERIMENTAL generations of history to consider for plateau check. Default 200. |
+| `--plateau-delta D` | EXPERIMENTAL min match-% gain over the window to NOT count as plateau. Default 0.005. |
+| `--phase-brushes-multi "g1 ; g2 ; g3"` | EXPERIMENTAL alternative to `--phase-brushes`. Semicolon-separated phase groups (multiple brushes per phase, picked uniform-random within a phase). Use case: textural variety within a color tier — e.g. three subtly-different oil-paint brushes for one stage, or natural-looking color drift via near-identical hexes. Mutually exclusive with `--phase-brushes`. |
+| `-v` / `--verbose` | INFO logging: phase advances with reason, gens-in-phase, match-% at advance. |
+| `-vv` / `--debug` | DEBUG logging: INFO + per-gen plateau buffer state, mutator-params hash. |
+
+All `imagemutate` flags also apply (e.g., `-S triangle`, `-j 8`, `--adaptive-cheat-mode`, `--compare-strategy lab`), with one default difference: **imagephase defaults `--brush-alpha 255` and `--brush-blend-mode opaque`** (FDM-faithful, top-brush-wins composite). Both are overridable; non-default values emit a stderr warning since they defeat phase mode's intent.
+
+**Plateau-then-switch:** the plateau detector advances a phase when both conditions hold over the rolling `plateau_window`:
+- `history[-1] - history[0] < plateau_delta` (terminal-vs-initial gain too small)
+- `max(history) - min(history) < 2 * plateau_delta` (variance too small to be progress)
+
+The variance co-condition rules out windows that oscillate around a fixed mean. If `--phase-max-gens` is reached first, advance happens via the `max_gens` reason instead.
+
+```bash
+# Three-phase paint with synthetic targets and brushes
+imagephase target.png \
+  --start-canvas black-seed.png \
+  --phases 3 \
+  --phase-brushes phase1.png phase2.png phase3.png \
+  --phase-max-radius 80 40 20 --phase-min-radius 8 6 4 \
+  --plateau-window 50 --plateau-delta 0.005 \
+  -S triangle -j 8 -c 50 \
+  --save-on-exit --close-on-exit -p mypaint
+```
+
+**Sample stderr output at `-v`:**
+
+```
+imagephase: 3 phases, plateau_window=50, plateau_delta=0.005
+  phase 1/3: brushes=[phase1.png] max_radius=80 min_radius=8 max_gens=inf
+  phase 2/3: brushes=[phase2.png] max_radius=40 min_radius=6 max_gens=inf
+  phase 3/3: brushes=[phase3.png] max_radius=20 min_radius=4 max_gens=inf
+PHASE advance 1→2 reason=plateau gens=312 match-end=58.402%
+PHASE advance 2→3 reason=plateau gens=487 match-end=78.115%
+PHASE final reason=plateau gens=611 match-end=91.834%
+```
+
 ### imagereplay
 
 Replay a saved instructions file (`.json` output from `imagemutate -i`).
