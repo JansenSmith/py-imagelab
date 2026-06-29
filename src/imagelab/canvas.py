@@ -240,8 +240,14 @@ class CanvasActionDrawShape(CanvasAction):
                                 (radius*2-brush_image_size[0])/2,
                                 (radius*2-brush_image_size[1])/2
                             )
-            shape_surface.blit(brush_image, center_offset, None,
-                               pygame.BLEND_MIN)
+            # blend_mode gates the channel-wise BLEND_MIN composite.
+            # Default 'min' = legacy behavior (channel-wise minimum darkens
+            # overlapping brush regions). 'opaque' / 'alpha' / None skip
+            # BLEND_MIN — the top brush wins outright, relying on set_alpha
+            # for overlay opacity. See --brush-blend-mode CLI flag.
+            blend_mode = self.params.get('blend_mode') or 'min'
+            blend_flag = pygame.BLEND_MIN if blend_mode == 'min' else 0
+            shape_surface.blit(brush_image, center_offset, None, blend_flag)
 
         canvas.blit(shape_surface, (draw_pos[0] - radius, draw_pos[1] - radius))
 

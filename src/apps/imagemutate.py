@@ -921,6 +921,16 @@ class App:
         self._current_radius = max_radius
         self._current_children = children
 
+        # Resolve brush composite controls. brush_alpha=None means
+        # "use the downstream default" — mutate_evolve falls back to 180.
+        # brush_blend_mode 'auto' resolves to 'opaque' (alpha>=255) or 'min'
+        # (alpha<255). Explicit values pass through unchanged.
+        brush_alpha = self.options.get('brush_alpha')
+        brush_blend_mode = self.options.get('brush_blend_mode', 'auto')
+        if brush_blend_mode == 'auto':
+            effective_alpha = brush_alpha if brush_alpha is not None else 180
+            brush_blend_mode = 'opaque' if effective_alpha >= 255 else 'min'
+
         mutator_params = {
             'target': self.target_surface,
             'clip_rect': self._clip_rect,
@@ -929,6 +939,7 @@ class App:
             'words': self.options.get('words', None),
             'brush_images': self.brush_surfaces,
             'max_radius': max_radius,
+            'blend_mode': brush_blend_mode,
             'child_callback': self.child_callback,
             'score_fn': STRATEGIES.get(
                 self.options.get('compare_strategy', 'euclidean'),
@@ -938,6 +949,10 @@ class App:
             'workers': self.options.get('workers', 1),
             '_parallel_stats': {},
         }
+        # Only override alpha when explicit; absence preserves mutate_evolve's
+        # legacy default of 180.
+        if brush_alpha is not None:
+            mutator_params['alpha'] = brush_alpha
         self.canvas.apply_mutator(mutation.mutate_evolve, mutator_params)
         self._last_worker_times = mutator_params['_parallel_stats'].get('worker_times', [])
 

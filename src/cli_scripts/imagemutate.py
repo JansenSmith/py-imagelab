@@ -19,6 +19,16 @@ def mapped_shape(shape_name):
     return SHAPE_MAP.get(shape_name)
 
 
+def _brush_alpha_in_range(s):
+    """argparse type: int in 1..255 (pygame's set_alpha valid range)."""
+    n = int(s)
+    if not 1 <= n <= 255:
+        raise argparse.ArgumentTypeError(
+            f"--brush-alpha must be in 1..255, got {n}"
+        )
+    return n
+
+
 def get_arg_parser():
     """Parse and return command line options for image mutate"""
     parser = argparse.ArgumentParser(
@@ -136,6 +146,27 @@ def get_arg_parser():
                         action="store_true",
                         help="automatically save output when evolution completes"
                         )
+    parser.add_argument(
+        "--brush-alpha",
+        type=_brush_alpha_in_range,
+        default=None,
+        help="""Brush composite alpha, 1-255. Default 180 (legacy default
+            applied downstream). Explicit value passes through to the
+            shape surface's set_alpha. Useful for FDM-style fully-opaque
+            painting at 255."""
+    )
+    parser.add_argument(
+        "--brush-blend-mode",
+        default="auto",
+        choices=["auto", "opaque", "min", "alpha"],
+        help="""Brush composite blend mode.
+            'auto' (default) derives from --brush-alpha:
+            255 -> 'opaque' (top brush wins, no darkening on overlap);
+            <255 -> 'min' (legacy pygame.BLEND_MIN, channel-wise minimum,
+            darkens overlapping brush regions).
+            'opaque' / 'min' / 'alpha' force the mode regardless of alpha.
+            Omitting both flags reproduces upstream behavior exactly."""
+    )
 
     parser.add_argument(
         '-C',
