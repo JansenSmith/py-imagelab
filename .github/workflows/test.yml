@@ -2,6 +2,10 @@ name: tests
 
 on: [push, pull_request]
 
+# Run name: branch first (feature context), commit subject second
+# (what specifically triggered this run).
+run-name: tests on ${{ github.ref_name }} — ${{ github.event.head_commit.message }}
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
