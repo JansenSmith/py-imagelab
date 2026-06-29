@@ -22,9 +22,19 @@ def draw_random_circle(canvas, clip_rect=None, max_radius=20, radius=None,
               'radius': radius, 'alpha': alpha, 'shape': SHAPE_CIRCLE}
 
     if brush_image:
-        brush_size = brush_image.get_size()
-        max_sample_size = max(radius*2, min(brush_size))
-        sample_size = rng.integers(radius*2, max_sample_size)
+        min_brush_dim = min(brush_image.get_size())
+        # Brush sample size logic. Pre-fix behavior crashed in two ways when
+        # the brush was at most radius*2 in its smaller dimension:
+        #   - rng.integers(radius*2, max_sample_size) with low >= high
+        #   - downstream get_random_clip_rect(constrain=True) raising
+        #     high <= 0 once sample_size exceeded the brush dimension.
+        # The brush must be at least radius*2 to sample a radius*2 patch
+        # from it; when it isn't, sample the whole brush (the downstream
+        # smoothscale upscales to radius*2 anyway).
+        if min_brush_dim > radius*2:
+            sample_size = rng.integers(radius*2, min_brush_dim)
+        else:
+            sample_size = min_brush_dim
         params['brush_sample_rect'] = get_random_clip_rect(
             brush_image.get_rect(),
             sample_size,
@@ -56,9 +66,12 @@ def draw_random_polygon(canvas, edges=None, rotation=None, clip_rect=None,
               'alpha': alpha, 'shape': SHAPE_POLYGON}
 
     if brush_image:
-        brush_size = brush_image.get_size()
-        max_sample_size = max(radius*2, min(brush_size))
-        sample_size = rng.integers(radius*2, max_sample_size)
+        min_brush_dim = min(brush_image.get_size())
+        # See draw_random_circle for rationale on this branch.
+        if min_brush_dim > radius*2:
+            sample_size = rng.integers(radius*2, min_brush_dim)
+        else:
+            sample_size = min_brush_dim
         params['brush_sample_rect'] = get_random_clip_rect(
             brush_image.get_rect(),
             sample_size,

@@ -10,8 +10,18 @@ def get_random_clip_rect(rect, clip_width, clip_height, constrain=False):
         input rect bounds
     """
     if constrain:
-        x_pos = rng.integers(0, rect.width - clip_width)
-        y_pos = rng.integers(0, rect.height - clip_height)
+        # When the clip exactly fills (or exceeds) the rect dimension on an
+        # axis, the only valid position on that axis is 0. Without this guard
+        # numpy's rng.integers raises `high <= 0` since rect.dim - clip_dim
+        # <= 0.
+        x_pos = (
+            rng.integers(0, rect.width - clip_width)
+            if rect.width > clip_width else 0
+        )
+        y_pos = (
+            rng.integers(0, rect.height - clip_height)
+            if rect.height > clip_height else 0
+        )
     else:
         x_pos = rng.integers(int(-(clip_width/2)), int(rect.width - (clip_width/2)))
         y_pos = rng.integers(int(-(clip_height/2)), int(rect.height - (clip_height/2)))
