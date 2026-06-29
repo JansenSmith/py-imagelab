@@ -19,6 +19,17 @@ xvfb-run -a pytest -q
 
 CI uses option 2 (Ubuntu runner has xvfb available via `apt-get install -y xvfb`).
 
+## Test dependencies
+
+```bash
+pip install pytest pillow
+```
+
+`pillow` is used by `tests/conftest.py` for dynamic fixture generation
+(`brush_solid` factory). Avoids relying on ImageMagick on the system,
+which varies in version + binary name (`magick` vs `convert`) across
+Ubuntu releases.
+
 ## Fixtures
 
 | Fixture | Description |
@@ -28,7 +39,7 @@ CI uses option 2 (Ubuntu runner has xvfb available via `apt-get install -y xvfb`
 | `red_corner_64` | 64×64 black PNG with a red corner square; used for start-canvas tests |
 | `corrupt_png` | Truncated PNG byte stream — decoders must fail cleanly |
 | `baseline_hash` | The expected SHA256 of the canonical baseline output |
-| `brush_solid(hex)` | Factory producing a temp 64×64 solid-color brush PNG (uses `magick` from ImageMagick) |
+| `brush_solid(hex, size=128)` | Factory producing a temp solid-color RGB brush PNG (Pillow). Default 128px on a side; pass `size=` for tests that need smaller. |
 | `imagemutate_cmd` | Locates the installed `imagemutate` entry point |
 
 ## Regenerating the baseline

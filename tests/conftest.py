@@ -1,9 +1,9 @@
 """Shared pytest fixtures for py-imagelab tests."""
 import pathlib
 import shutil
-import subprocess
 
 import pytest
+from PIL import Image
 
 
 FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
@@ -55,20 +55,27 @@ def baseline_hash():
 
 @pytest.fixture
 def brush_solid(tmp_path):
-    """Factory: brush_solid('#FF0000') -> path to a 64x64 solid-color PNG.
+    """Factory: brush_solid('#FF0000') -> path to a solid-color PNG.
+
+    Default size is 128 (not 64) so the brush is strictly larger than the
+    upstream brush-sample-rect logic in drawing.py expects; with size equal
+    to canvas dimensions, the original code triggers ValueError in
+    rng.integers(radius*2, max_sample_size). Tests that exercise the
+    degenerate-size code path should pass a smaller `size` explicitly.
+
+    Always 24-bit sRGB RGB (Pillow's "RGB" mode = png color-type 2).
+    pygame.transform.smoothscale rejects indexed / paletted surfaces.
 
     Brushes are written to a per-test tmp_path so they're cleaned up
-    automatically. Returns pathlib.Path. Requires `magick` (ImageMagick) on PATH.
+    automatically. Returns pathlib.Path.
     """
     counter = {"n": 0}
 
-    def _factory(hex_color):
+    def _factory(hex_color, size=128):
         counter["n"] += 1
         out = tmp_path / f"brush_{counter['n']}_{hex_color.lstrip('#')}.png"
-        subprocess.run(
-            ["magick", "-size", "64x64", f"xc:{hex_color}", str(out)],
-            check=True,
-        )
+        img = Image.new("RGB", (size, size), hex_color)
+        img.save(out, "PNG")
         return out
 
     return _factory
