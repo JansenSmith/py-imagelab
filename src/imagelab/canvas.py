@@ -251,43 +251,120 @@ class CanvasActionDrawShape(CanvasAction):
                 brush_image = pygame.transform.rotate(
                     brush_image, brush_rotation)
 
-        shape_surface = pygame.Surface((radius*2, radius*2))
-        shape_surface.set_colorkey(color_key)
-        shape_surface.fill(color_key)
-        shape_surface.set_alpha(alpha)
-
         if not brush_image:
+            # No-brush path: unchanged from upstream original. Colorkey-based
+            # transparency, polygon drawn directly in `color`, blitted onto
+            # canvas without blend flags. This path doesn't exhibit the
+            # white-stencil leak because there's no brush to gap.
+            shape_surface = pygame.Surface((radius*2, radius*2))
+            shape_surface.set_colorkey(color_key)
+            shape_surface.fill(color_key)
+            shape_surface.set_alpha(alpha)
+
             if SHAPE_CIRCLE == shape:
                 pygame.draw.circle(shape_surface, color,
                                    (radius, radius), radius, 0)
             else:
                 poly = get_polygon(edges, radius, (radius, radius), rotation)
                 pygame.draw.polygon(shape_surface, color, poly)
+
+            canvas.blit(shape_surface,
+                        (draw_pos[0] - radius, draw_pos[1] - radius))
+            return
+
+        # Brush path: SRCALPHA shape_surface; polygon defines an alpha mask
+        # ONLY (the polygon never contributes color to the canvas); brush
+        # supplies all visible color. No leak possible because there's no
+        # stencil color present to leak through.
+        #
+        # NB: this also fixes a previously-masked rendering bug — in the
+        # legacy implementation, the original `pygame.BLEND_MIN` was
+        # functioning as the polygon-shape CLIPPING mechanism (min(brush,
+        # white_stencil)=brush inside polygon; min(brush, black_bg)=black
+        # outside, which got colorkey-masked). When F1's `--brush-blend-mode
+        # opaque` skipped BLEND_MIN, the clipping mechanism disappeared and
+        # strokes rendered as brush rectangles rather than polygons. The
+        # explicit BLEND_RGBA_MULT mask below clips to polygon shape
+        # regardless of blend_mode.
+        shape_surface = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+        shape_surface.fill((0, 0, 0, 0))
+
+        mask_surface = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+        mask_surface.fill((0, 0, 0, 0))
+        if SHAPE_CIRCLE == shape:
+            pygame.draw.circle(mask_surface, (255, 255, 255, 255),
+                               (radius, radius), radius, 0)
         else:
-            if SHAPE_CIRCLE == shape:
-                pygame.draw.circle(shape_surface, (255, 255, 255),
-                                   (radius, radius), radius, 0)
-            else:
-                poly = get_polygon(edges, radius, (radius, radius), rotation)
-                pygame.draw.polygon(shape_surface, (255, 255, 255), poly)
+            poly = get_polygon(edges, radius, (radius, radius), rotation)
+            pygame.draw.polygon(mask_surface, (255, 255, 255, 255), poly)
 
-            # rotation may have embiggened the brush image, so we want to
-            # center it
-            brush_image_size = brush_image.get_size()
-            center_offset = (
-                                (radius*2-brush_image_size[0])/2,
-                                (radius*2-brush_image_size[1])/2
-                            )
-            # blend_mode gates the channel-wise BLEND_MIN composite.
-            # Default 'min' = legacy behavior (channel-wise minimum darkens
-            # overlapping brush regions). 'opaque' / 'alpha' / None skip
-            # BLEND_MIN — the top brush wins outright, relying on set_alpha
-            # for overlay opacity. See --brush-blend-mode CLI flag.
-            blend_mode = self.params.get('blend_mode') or 'min'
-            blend_flag = pygame.BLEND_MIN if blend_mode == 'min' else 0
-            shape_surface.blit(brush_image, center_offset, None, blend_flag)
+        # rotation may have embiggened the brush image, so we want to
+        # center it
+        brush_image_size = brush_image.get_size()
+        center_offset = (
+                            (radius*2-brush_image_size[0])/2,
+                            (radius*2-brush_image_size[1])/2
+                        )
+        shape_surface.blit(brush_image, center_offset)
 
-        canvas.blit(shape_surface, (draw_pos[0] - radius, draw_pos[1] - radius))
+        # BLEND_RGBA_MULT multiplies channel-wise: pixels inside the
+        # polygon (mask alpha=255) preserve brush color & alpha;
+        # pixels outside (mask alpha=0) become fully transparent.
+        shape_surface.blit(
+            mask_surface, (0, 0),
+            special_flags=pygame.BLEND_RGBA_MULT,
+        )
+
+        # blend_mode controls how this stroke composites onto the canvas
+        # at the existing pixels. 'min' = channel-wise minimum (darkens
+        # overlapping strokes); 'opaque' / 'alpha' / None = normal alpha
+        # blend (top stroke wins outright). See --brush-blend-mode CLI
+        # flag and F1 PR for the original semantic intent.
+        #
+        # NB: pygame.BLEND_MIN does not respect SRCALPHA — transparent
+        # source pixels (alpha=0) are treated as opaque black and would
+        # min canvas pixels to (0,0,0). To prevent that, we clip the
+        # BLEND_MIN blit to the polygon's bounding sub-region of
+        # shape_surface AND additionally use the mask to short-circuit
+        # outside the polygon. The simplest pygame-safe path: in 'min'
+        # mode, do per-pixel BLEND_MIN via surfarray under the mask.
+        blend_mode = self.params.get('blend_mode') or 'min'
+        if blend_mode == 'min':
+            # numpy-side per-pixel min, masked by the polygon's alpha.
+            # Avoids pygame.BLEND_MIN's alpha-ignorance pitfall.
+            sx, sy = (draw_pos[0] - radius, draw_pos[1] - radius)
+            cw, ch = canvas.get_size()
+            x0, y0 = max(sx, 0), max(sy, 0)
+            x1, y1 = min(sx + radius*2, cw), min(sy + radius*2, ch)
+            if x0 < x1 and y0 < y1:
+                # Source sub-rect (in shape_surface coords)
+                srcx0, srcy0 = x0 - sx, y0 - sy
+                srcx1, srcy1 = x1 - sx, y1 - sy
+                canvas_arr = pygame.surfarray.pixels3d(canvas)
+                mask_arr = pygame.surfarray.pixels_alpha(mask_surface)
+                shape_arr = pygame.surfarray.pixels3d(shape_surface)
+                # Apply per-stroke alpha by scaling mask intensity.
+                stroke_alpha = alpha / 255.0 if alpha is not None else 1.0
+                m = (mask_arr[srcx0:srcx1, srcy0:srcy1] / 255.0
+                     * stroke_alpha)
+                dst_slice = canvas_arr[x0:x1, y0:y1]
+                src_slice = shape_arr[srcx0:srcx1, srcy0:srcy1]
+                # Where mask is full: min(canvas, brush); where mask is
+                # zero: keep canvas unchanged. Smooth blend across edges.
+                import numpy as np
+                m3 = m[..., None]
+                mn = np.minimum(dst_slice, src_slice)
+                dst_slice[...] = (mn * m3 + dst_slice * (1.0 - m3)).astype(
+                    dst_slice.dtype
+                )
+                # Release surfarray locks
+                del canvas_arr, mask_arr, shape_arr
+        else:
+            # opaque / alpha / None: per-pixel alpha blend respects the
+            # mask naturally (transparent SRCALPHA pixels don't draw).
+            shape_surface.set_alpha(alpha)
+            canvas.blit(shape_surface,
+                        (draw_pos[0] - radius, draw_pos[1] - radius))
 
 
 class CanvasActionDrawText(CanvasAction):
