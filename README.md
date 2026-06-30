@@ -160,6 +160,8 @@ PHASE advance 2→3 reason=plateau gens=487 match-end=78.115%
 PHASE final reason=plateau gens=611 match-end=91.834%
 ```
 
+**On-window HUD:** While running, imagephase adds a phase-status bar above imagemutate's existing HUD: `phase: N/M  ·  brush: <name>  ·  gens-in-phase: G  ·  plateau: <spread>/<threshold>` (yellow). Always visible while phase mode is active. The `plateau` column shows the current `max(history) - min(history)` over the rolling window vs the `2 * plateau_delta` threshold — when spread drops below threshold (and terminal-vs-initial gain drops below `plateau_delta`), the phase advances.
+
 ### imagereplay
 
 Replay a saved instructions file (`.json` output from `imagemutate -i`).
