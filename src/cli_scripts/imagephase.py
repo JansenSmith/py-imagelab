@@ -106,6 +106,25 @@ def get_arg_parser():
              "INFO-level only.",
     )
 
+    movie_group = parser.add_argument_group(
+        'stroke-movie capture (F9)',
+        'Per-stroke frame dump for assembling a layer-by-layer time-lapse.',
+    )
+    movie_group.add_argument(
+        "--frames-dir", default=None,
+        help="Directory to dump one PNG per winning child (canvas state after "
+             "the stroke is applied). EXPENSIVE — a 20K-gen run × ~200KB per "
+             "frame is ~4GB. Use deliberately. Off by default. Pairs with "
+             "tools/assemble_stroke_movie.py to produce an mp4.",
+    )
+    movie_group.add_argument(
+        "--phase-pause-frames", type=int, default=0,
+        help="When a phase advances, write N copies of the boundary frame "
+             "into the frame sequence so playback shows a visible pause at "
+             "the transition (e.g. N=30 at 30fps = 1s hold). Requires "
+             "--frames-dir. Default 0 (no pause).",
+    )
+
     return parser
 
 
