@@ -27,7 +27,11 @@ import sys
 
 import pygame
 
-from apps.imagemutate import App as MutateApp
+from apps.imagemutate import (
+    App as MutateApp,
+    HUD_FONT_SIZE,
+    HUD_PADDING,
+)
 from imagelab import mutation
 from imagelab.compare import get_match_percentage, match_score
 from imagelab.phasing import PhaseState
@@ -254,3 +258,61 @@ class App(MutateApp):
         if self._final_phase_complete:
             return True
         return super().evolution_complete()
+
+    def render_hud(self, surface):
+        """Override: draw a phase-info bar above imagemutate's existing HUD bar.
+
+        Layout:
+            ...image...
+            [phase: 2/3 | brush: ... | gens-in-phase: 137 | plateau: 0.003/0.010]  ← phase bar
+            [gen: 137/inf | child: 5/10 | maxR: 25                              ]  ← imagemutate's status line
+            [Esc: quit | Space: stats | Enter/S: snapshot | A: save JSON | ...   ]  ← imagemutate's hotkeys line
+        """
+        # Draw imagemutate's existing 2-line HUD at the bottom first.
+        super().render_hud(surface)
+        # Then draw our phase bar above it.
+        self._render_phase_bar(surface)
+
+    def _render_phase_bar(self, surface):
+        """Draw the phase-progress bar above imagemutate's HUD."""
+        if self.hud_font is None or self.phase_state is None:
+            return
+
+        ps = self.phase_state
+        screen_w, screen_h = surface.get_size()
+        line_h = HUD_FONT_SIZE + HUD_PADDING * 2
+        existing_hud_h = line_h * 2 + HUD_PADDING  # 2-line bar from parent
+
+        bar = pygame.Surface((screen_w, line_h), pygame.SRCALPHA)
+        bar.fill((0, 0, 0, 160))
+
+        brush_paths = ps.current_brushes()
+        brush_names = ", ".join(os.path.basename(str(p)) for p in brush_paths)
+        # Truncate brush names if absurdly long so we don't blow past screen.
+        if len(brush_names) > 60:
+            brush_names = brush_names[:57] + "..."
+
+        # Plateau buffer state: max-min spread vs the 2*delta threshold.
+        if ps.match_history:
+            spread = max(ps.match_history) - min(ps.match_history)
+            plateau_str = f"{spread:.3f}/{ps.plateau_delta * 2:.3f}"
+        else:
+            plateau_str = "—"
+
+        # Truncation rule: at very high phase counts, show N+/M instead of
+        # listing — keeps the bar from overflowing.
+        if ps.total_phases > 99:
+            phase_str = f"phase: {ps.current_phase + 1}/{ps.total_phases}+"
+        else:
+            phase_str = f"phase: {ps.current_phase + 1}/{ps.total_phases}"
+
+        text = (
+            f"{phase_str}  ·  "
+            f"brush: {brush_names}  ·  "
+            f"gens-in-phase: {ps.gens_in_current}  ·  "
+            f"plateau: {plateau_str}"
+        )
+        # Yellow-ish color distinguishes phase bar from white/gray imagemutate HUD.
+        text_surf, _ = self.hud_font.render(text, (220, 220, 100))
+        bar.blit(text_surf, (HUD_PADDING, HUD_PADDING))
+        surface.blit(bar, (0, screen_h - existing_hud_h - line_h))
