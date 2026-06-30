@@ -187,6 +187,33 @@ At run end, a per-phase stats table is printed to stdout (one row per phase: pha
 
 `advance_reason` ∈ `{"plateau", "max_gens", "in_progress"}`. `"in_progress"` appears only for the current (unfinalized) phase if you save mid-run; `clock_time` is `null` in that case.
 
+### tools/filament_stack_to_phases — FDM filament painting helper
+
+Sibling tool to `imagephase` for filament-painting workflows. Given a filament stack (layer height + ordered `<hex>:<TD>` list), derives Beer-Lambert blended colors per print layer and generates an `imagephase` invocation that paints those colors in phase order.
+
+```bash
+python tools/filament_stack_to_phases.py \
+  --target inputs/horses.png \
+  --layer-height 0.04 \
+  --filament 000000:0.3 \
+  --filament 4E3524:1.7 \
+  --filament E5DCC8:4.8 \
+  --out-dir ./horses_phases/
+bash horses_phases/phase_run.sh
+```
+
+Or pre-fill from a HueForge `.hfp` file:
+
+```bash
+python tools/filament_stack_to_phases.py \
+  --target inputs/horses.png \
+  --hfp /path/to/piece.hfp \
+  --out-dir ./horses_phases/ \
+  --run
+```
+
+See `tools/README.md` for full flag reference, derivation algorithm, ΔE formula choice, and limitations. See `tools/CITATIONS.md` for the Kromacut/HueForge research that informed the default thresholds.
+
 ### imagereplay
 
 Replay a saved instructions file (`.json` output from `imagemutate -i`).
