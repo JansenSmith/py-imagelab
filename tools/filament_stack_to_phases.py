@@ -48,6 +48,23 @@ DEFAULT_OPACITY_CEILING = 0.85   # asymptote at which adding layers stops
 DEFAULT_BRUSH_SIZE = 256          # solid-color brush PNG dimensions
 DEFAULT_OUT_DIR = "./phases_out/"
 
+# Physical-print defaults (F8 — nozzle-derived radius schedule).
+# Calibrated against community research; see CITATIONS.md.
+DEFAULT_PRINT_MAX_DIM_MM = 242.0  # artist's most common max-dim across
+                                   # pieces; NOT universal — override per
+                                   # piece (see art/pieces.md).
+DEFAULT_TOWER_SAFETY_FACTOR = 3.0  # nozzle_mm × this = min reliable tower
+                                    # diameter on X1C + 0.4mm nozzle at
+                                    # filament-painting conditions
+                                    # (community-convergent; see CITATIONS.md).
+MIN_PIXELS_PER_MM = 2.0           # below this: features print too coarsely
+MAX_PIXELS_PER_MM = 5.0           # above this: GA convergence wastefully slow
+RADIUS_FRACTION_PHASE_0 = 0.12    # max-radius of bottom phase = 12% of print
+                                   # max-dim (large coverage strokes).
+RADIUS_FRACTION_PHASE_N = 0.025   # max-radius of top phase = 2.5% of print
+                                   # max-dim (small detail strokes), with a
+                                   # 3×min-radius-top floor for safety.
+
 
 # ---------- color math ----------
 
@@ -262,6 +279,85 @@ def derive_phases(filaments, layer_height_mm,
     return phases
 
 
+# ---------- radius schedule (F8) ----------
+
+def derive_radius_schedule(n_phases, image_max_dim_px, print_max_dim_mm,
+                            nozzle_mm, tower_safety_factor):
+    """Per-phase (max_radius, min_radius) lists in pixels.
+
+    Derivation:
+        pixels_per_mm   = image_max_dim_px / print_max_dim_mm
+        min_tower_mm    = nozzle_mm × tower_safety_factor
+        min_radius_top  = max(2, ceil(min_tower_mm × pixels_per_mm / 2))
+
+        max_radius_phase_0 = ceil(print_max_dim_mm × 0.12  × pixels_per_mm)
+        max_radius_phase_N = max(min_radius_top × 3,
+                                 ceil(print_max_dim_mm × 0.025 × pixels_per_mm))
+        # linear-interpolated across n_phases
+
+        min_radius_top   = (above)  — topmost phase
+        min_radius_other = max(2, floor(min_radius_top × 0.5))
+
+    Returns (max_radii, min_radii), each a list of length n_phases.
+    """
+    if n_phases < 1:
+        raise ValueError(f"n_phases must be >= 1, got {n_phases}")
+    if image_max_dim_px <= 0 or print_max_dim_mm <= 0:
+        raise ValueError("image_max_dim_px and print_max_dim_mm must be > 0")
+    if nozzle_mm <= 0 or tower_safety_factor <= 0:
+        raise ValueError("nozzle_mm and tower_safety_factor must be > 0")
+
+    pixels_per_mm = image_max_dim_px / print_max_dim_mm
+    min_tower_mm = nozzle_mm * tower_safety_factor
+    min_radius_top = max(2, math.ceil(min_tower_mm * pixels_per_mm / 2))
+
+    max_r_phase_0 = math.ceil(
+        print_max_dim_mm * RADIUS_FRACTION_PHASE_0 * pixels_per_mm
+    )
+    max_r_phase_N = max(
+        min_radius_top * 3,
+        math.ceil(print_max_dim_mm * RADIUS_FRACTION_PHASE_N * pixels_per_mm),
+    )
+
+    if n_phases == 1:
+        max_radii = [max_r_phase_N]
+    else:
+        # Linear interpolation; phase 0 → max_r_phase_0, phase N-1 → max_r_phase_N.
+        max_radii = []
+        for i in range(n_phases):
+            frac = i / (n_phases - 1)
+            r = max_r_phase_0 + (max_r_phase_N - max_r_phase_0) * frac
+            max_radii.append(max(min_radius_top, int(round(r))))
+
+    min_radius_other = max(2, math.floor(min_radius_top * 0.5))
+    if n_phases == 1:
+        min_radii = [min_radius_top]
+    else:
+        min_radii = [min_radius_other] * (n_phases - 1) + [min_radius_top]
+
+    return max_radii, min_radii
+
+
+def pixels_per_mm_warning(pixels_per_mm):
+    """Return a warning string if pixels_per_mm is out of recommended band,
+    else None. Recommended sweet spot: ~3 px/mm."""
+    if pixels_per_mm < MIN_PIXELS_PER_MM:
+        return (
+            f"target image too small relative to print "
+            f"({pixels_per_mm:.2f} px/mm; recommended ≥ {MIN_PIXELS_PER_MM}). "
+            f"Features will print blocky. Consider rescaling to a larger "
+            f"max-dim."
+        )
+    if pixels_per_mm > MAX_PIXELS_PER_MM:
+        return (
+            f"target image very high resolution "
+            f"({pixels_per_mm:.2f} px/mm; recommended ≤ {MAX_PIXELS_PER_MM}). "
+            f"GA convergence will be slow with no fidelity gain. Consider "
+            f"downscaling."
+        )
+    return None
+
+
 # ---------- CLI ----------
 
 def _parse_filament_arg(s):
@@ -375,6 +471,32 @@ def get_arg_parser():
              "what's already there). Use for debugging the cascade.",
     )
     parser.add_argument(
+        '--nozzle-mm', type=float, default=None,
+        help="Nozzle diameter in mm (e.g. 0.4). When supplied, F8 derives a "
+             "per-phase radius schedule (smallest features on top phase) and "
+             "wires it into phase_run.sh via --phase-max-radius / "
+             "--phase-min-radius. Without this flag, no radius schedule is "
+             "emitted and imagephase's defaults apply (which may produce "
+             "features smaller than the printer can resolve).",
+    )
+    parser.add_argument(
+        '--print-max-dim-mm', type=float,
+        default=DEFAULT_PRINT_MAX_DIM_MM,
+        help=f"Physical max dimension of the printed piece in mm "
+             f"(longest side, orientation-independent). Default: "
+             f"{DEFAULT_PRINT_MAX_DIM_MM} (the artist's most common "
+             f"max-dim). Override per piece — NOT universal.",
+    )
+    parser.add_argument(
+        '--tower-safety-factor', type=float,
+        default=DEFAULT_TOWER_SAFETY_FACTOR,
+        help=f"Multiplier on --nozzle-mm yielding the minimum reliable "
+             f"isolated tower diameter for the topmost phase. Default: "
+             f"{DEFAULT_TOWER_SAFETY_FACTOR} (community-convergent for "
+             f"Bambu X1C + 0.4mm nozzle at filament-painting conditions; "
+             f"see tools/CITATIONS.md).",
+    )
+    parser.add_argument(
         '--run', action='store_true',
         help="Invoke `imagephase` directly with the generated config. "
              "Otherwise, only emits `phase_run.sh` (executable) for the "
@@ -396,22 +518,38 @@ def write_init_canvas(rgb, target_size, path):
 
 
 def emit_phase_run_sh(out_dir, target_path, init_canvas_path,
-                       brush_paths, prefix='fdm'):
-    """Write a shell script invoking `imagephase` with all wired flags."""
+                       brush_paths, prefix='fdm',
+                       max_radii=None, min_radii=None):
+    """Write a shell script invoking `imagephase` with all wired flags.
+
+    If max_radii / min_radii supplied (length = n_phases), wires them
+    via --phase-max-radius / --phase-min-radius (F8). Otherwise, omits
+    those flags and imagephase's defaults apply.
+    """
     n = len(brush_paths)
     brush_args = ' '.join(str(p) for p in brush_paths)
+    radius_lines = ""
+    if max_radii is not None and min_radii is not None:
+        if len(max_radii) != n or len(min_radii) != n:
+            raise ValueError(
+                f"radius schedule length mismatch: phases={n}, "
+                f"max_radii={len(max_radii)}, min_radii={len(min_radii)}"
+            )
+        radius_lines = (
+            f"  --phase-max-radius {' '.join(str(r) for r in max_radii)} \\\n"
+            f"  --phase-min-radius {' '.join(str(r) for r in min_radii)} \\\n"
+        )
     script = f"""#!/usr/bin/env bash
 # Generated by filament_stack_to_phases.
 # Edit as needed before running; defaults are sensible but per-piece
-# tuning may improve results (e.g. --phase-max-radius / --phase-min-radius
-# from F8 derivation, or --plateau-window / --plateau-delta tuning).
+# tuning may improve results (e.g. --plateau-window / --plateau-delta).
 set -euo pipefail
 
 imagephase {target_path} \\
   --start-canvas {init_canvas_path} \\
   --phases {n} \\
   --phase-brushes {brush_args} \\
-  -S triangle \\
+{radius_lines}  -S triangle \\
   --adaptive-cheat-mode --compare-strategy lab \\
   -o 500 \\
   --save-on-exit --close-on-exit -p {prefix} \\
@@ -425,10 +563,15 @@ imagephase {target_path} \\
 
 
 def emit_phases_json(out_dir, phases, layer_height, filaments,
-                      deltae_threshold, opacity_ceiling):
-    """Write phases.json with full provenance for reproducibility."""
+                      deltae_threshold, opacity_ceiling,
+                      radius_schedule=None):
+    """Write phases.json with full provenance for reproducibility.
+
+    Schema v2 adds optional `radius_schedule` block when F8 derivation
+    is active. Absent → v1-equivalent payload.
+    """
     doc = {
-        'version': 1,
+        'version': 2,
         'layer_height_mm': layer_height,
         'deltae_threshold': deltae_threshold,
         'deltae_formula': 'CIE-1976',
@@ -439,6 +582,8 @@ def emit_phases_json(out_dir, phases, layer_height, filaments,
         ],
         'phases': [p.to_dict() for p in phases],
     }
+    if radius_schedule is not None:
+        doc['radius_schedule'] = radius_schedule
     out_path = out_dir / 'phases.json'
     out_path.write_text(json.dumps(doc, indent=2))
     return out_path
@@ -503,6 +648,7 @@ def run():
     # Read target dims for init_canvas sizing.
     target_img = Image.open(args.target)
     target_size = target_img.size
+    image_max_dim_px = max(target_size)
 
     # Write brushes.
     brush_paths = []
@@ -515,12 +661,46 @@ def run():
     init_path = out_dir / 'init_canvas.png'
     write_init_canvas(args.filaments[0].rgb, target_size, init_path)
 
+    # F8 — derive radius schedule when --nozzle-mm supplied.
+    max_radii = None
+    min_radii = None
+    radius_schedule_doc = None
+    if args.nozzle_mm is not None:
+        try:
+            max_radii, min_radii = derive_radius_schedule(
+                n_phases=len(phases),
+                image_max_dim_px=image_max_dim_px,
+                print_max_dim_mm=args.print_max_dim_mm,
+                nozzle_mm=args.nozzle_mm,
+                tower_safety_factor=args.tower_safety_factor,
+            )
+        except ValueError as exc:
+            print(f"error: radius schedule: {exc}", file=sys.stderr)
+            sys.exit(1)
+        pixels_per_mm = image_max_dim_px / args.print_max_dim_mm
+        warn = pixels_per_mm_warning(pixels_per_mm)
+        if warn:
+            print(f"warning: {warn}", file=sys.stderr)
+        radius_schedule_doc = {
+            'nozzle_mm': args.nozzle_mm,
+            'print_max_dim_mm': args.print_max_dim_mm,
+            'tower_safety_factor': args.tower_safety_factor,
+            'image_max_dim_px': image_max_dim_px,
+            'pixels_per_mm': round(pixels_per_mm, 4),
+            'max_radii_px': max_radii,
+            'min_radii_px': min_radii,
+        }
+
     # Write phases.json + phase_run.sh.
     phases_json = emit_phases_json(
         out_dir, phases, args.layer_height, args.filaments,
         args.deltae_threshold, args.opacity_ceiling,
+        radius_schedule=radius_schedule_doc,
     )
-    sh = emit_phase_run_sh(out_dir, args.target, init_path, brush_paths)
+    sh = emit_phase_run_sh(
+        out_dir, args.target, init_path, brush_paths,
+        max_radii=max_radii, min_radii=min_radii,
+    )
 
     # Friendly summary to stderr.
     print(
@@ -529,13 +709,17 @@ def run():
         f"(ΔE threshold={args.deltae_threshold}, opacity ceiling={args.opacity_ceiling})",
         file=sys.stderr,
     )
-    for p in phases:
+    for i, p in enumerate(phases):
         f = args.filaments[p.filament_idx]
+        radius_tail = ""
+        if max_radii is not None:
+            radius_tail = f", radius {min_radii[i]}-{max_radii[i]}px"
         print(
             f"  phase {p.phase:>2}: {p.hex}  "
             f"(filament {p.filament_idx+1} {f.hex}, "
             f"layer {p.intra_filament_layer}, "
-            f"opacity={p.opacity:.3f}, ΔE-to-prior={p.delta_e_to_prior:.2f})",
+            f"opacity={p.opacity:.3f}, ΔE-to-prior={p.delta_e_to_prior:.2f}"
+            f"{radius_tail})",
             file=sys.stderr,
         )
     print(f"  → wrote {len(brush_paths)} brush PNGs to {brushes_dir}/",
