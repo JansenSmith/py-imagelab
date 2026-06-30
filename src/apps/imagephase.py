@@ -31,6 +31,8 @@ from apps.imagemutate import (
     App as MutateApp,
     HUD_FONT_SIZE,
     HUD_PADDING,
+    OUTPUT_MODE_IMAGE,
+    OUTPUT_MODE_INSTRUCTIONS,
 )
 from imagelab import mutation
 from imagelab.compare import get_match_percentage, match_score
@@ -226,6 +228,13 @@ class App(MutateApp):
         if not should:
             return
 
+        # F5: phase-boundary checkpoint save. Triggered only when --save-gen
+        # is active. Fires regardless of the periodic-modulo schedule — the
+        # boundary is always a notable artifact even if the periodic save
+        # would have happened at a different gen.
+        if self.options.get('save_gen') is not None:
+            self._save_image_with_phase(end=True)
+
         if self.phase_state.is_last_phase:
             log.info(
                 "imagephase: final phase complete (reason=%s, gens=%d, match=%.3f%%)",
@@ -258,6 +267,48 @@ class App(MutateApp):
         if self._final_phase_complete:
             return True
         return super().evolution_complete()
+
+    def save(self, output_mode=None):
+        """Override: image saves use phase-aware naming when phase mode is
+        active. Routes ALL image-mode saves (periodic, --save-on-exit, hotkey)
+        through `_save_image_with_phase`. Instruction-mode (JSON) saves fall
+        through to imagemutate's `save()` unchanged.
+
+        Filename pattern: <prefix>-c<C>-p<P>-g<G>.png (no `-end-` marker on
+        regular saves; only phase-boundary saves in handle_evolution_tick
+        set end=True)."""
+        if output_mode is None:
+            output_mode = (
+                OUTPUT_MODE_INSTRUCTIONS
+                if self.options.get('instructions') else OUTPUT_MODE_IMAGE
+            )
+        if output_mode == OUTPUT_MODE_IMAGE and self.phase_state is not None:
+            return self._save_image_with_phase(end=False)
+        return super().save(output_mode)
+
+    def _save_image_with_phase(self, end=False):
+        """Save canvas with imagephase's phase-aware naming convention:
+            <prefix>-c<C>-p<P>[-end]-g<G>.png
+        end=True is for phase-boundary saves (always fired on phase advance
+        when --save-gen is active, regardless of the modulo schedule).
+        Returns the path written, or None if no canvas to save."""
+        if self.canvas is None or self.canvas.surface is None:
+            return None
+        prefix = (self.options.get('prefix')
+                  or self.get_default_save_file_prefix())
+        children = self.options.get('children', 0)
+        phase_n = (self.phase_state.current_phase + 1) if self.phase_state else 0
+        gen = self.current_generation
+        end_marker = '-end' if end else ''
+        name = (
+            f"{prefix}-c{children:06d}-p{phase_n:02d}{end_marker}"
+            f"-g{gen:06d}.png"
+        )
+        save_dir = self.options.get('save_directory', '.')
+        path = os.path.join(save_dir, name)
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        pygame.image.save(self.canvas.surface, path)
+        return path
 
     def render_hud(self, surface):
         """Override: draw a phase-info bar above imagemutate's existing HUD bar.
