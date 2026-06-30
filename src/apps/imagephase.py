@@ -21,6 +21,8 @@ wants for FDM-faithful work.
 By default imagephase sets --brush-alpha 255 and --brush-blend-mode opaque
 (FDM-faithful: overlapping shapes don't darken). Both are overridable.
 """
+import datetime
+import json
 import logging
 import os
 import sys
@@ -235,30 +237,43 @@ class App(MutateApp):
         if self.options.get('save_gen') is not None:
             self._save_image_with_phase(end=True)
 
+        # F6: finalize per-phase stats before advancing. Captures gens_used,
+        # match_at_start, match_at_end, clock_time, advance_reason into the
+        # PhaseState's _finalized_stats list for end-of-run summary + JSON.
+        window_delta = self.phase_state.window_delta()
+        stats = self.phase_state.finalize_current_phase(reason)
+
         if self.phase_state.is_last_phase:
+            # Final phase complete. advance_reason in stats already records
+            # 'plateau' / 'max_gens'; but the user-facing label "final"
+            # captures that this is the end of the run.
             log.info(
                 "imagephase: final phase complete (reason=%s, gens=%d, match=%.3f%%)",
-                reason, self.phase_state.gens_in_current, pct,
+                reason, stats['gens_used'], stats['match_at_end'],
             )
             print(
-                f"PHASE final reason={reason} gens={self.phase_state.gens_in_current} "
-                f"match-end={pct:.3f}%",
+                f"PHASE final reason={reason} gens={stats['gens_used']} "
+                f"match-start={stats['match_at_start']:.3f}% "
+                f"match-end={stats['match_at_end']:.3f}% "
+                f"window-delta={window_delta:.4f}",
                 file=sys.stderr,
             )
             self._final_phase_complete = True
             return
 
         old_phase = self.phase_state.current_phase
-        gens_used = self.phase_state.gens_in_current
         self.phase_state.advance()
         log.info(
             "PHASE advance %d→%d reason=%s gens=%d match=%.3f%%",
             old_phase + 1, self.phase_state.current_phase + 1, reason,
-            gens_used, pct,
+            stats['gens_used'], stats['match_at_end'],
         )
         print(
             f"PHASE advance {old_phase+1}→{self.phase_state.current_phase+1} "
-            f"reason={reason} gens={gens_used} match-end={pct:.3f}%",
+            f"reason={reason} gens={stats['gens_used']} "
+            f"match-start={stats['match_at_start']:.3f}% "
+            f"match-end={stats['match_at_end']:.3f}% "
+            f"window-delta={window_delta:.4f}",
             file=sys.stderr,
         )
 
@@ -271,8 +286,9 @@ class App(MutateApp):
     def save(self, output_mode=None):
         """Override: image saves use phase-aware naming when phase mode is
         active. Routes ALL image-mode saves (periodic, --save-on-exit, hotkey)
-        through `_save_image_with_phase`. Instruction-mode (JSON) saves fall
-        through to imagemutate's `save()` unchanged.
+        through `_save_image_with_phase`. Instruction-mode (JSON) saves go
+        through `_save_instructions_with_phase` (F6) which injects per-shape
+        phase tagging and a top-level `phase_stats` array.
 
         Filename pattern: <prefix>-c<C>-p<P>-g<G>.png (no `-end-` marker on
         regular saves; only phase-boundary saves in handle_evolution_tick
@@ -282,9 +298,110 @@ class App(MutateApp):
                 OUTPUT_MODE_INSTRUCTIONS
                 if self.options.get('instructions') else OUTPUT_MODE_IMAGE
             )
-        if output_mode == OUTPUT_MODE_IMAGE and self.phase_state is not None:
+        if self.phase_state is None:
+            return super().save(output_mode)
+        if output_mode == OUTPUT_MODE_IMAGE:
             return self._save_image_with_phase(end=False)
-        return super().save(output_mode)
+        return self._save_instructions_with_phase()
+
+    def _save_instructions_with_phase(self):
+        """F6: extend imagemutate's instruction-mode save with phase metadata.
+        Top-level adds `phase_stats: [...]` (one record per finalized phase,
+        plus an in-progress record for the current phase if applicable).
+        Each shape in `history` gains a `phase` field (1-indexed) reflecting
+        which phase it was painted in."""
+        savefile = self.get_save_file_name('json')
+        os.makedirs(os.path.dirname(savefile) or '.', exist_ok=True)
+        canvas_data = self.canvas.serialize()
+        # Tag each shape's params dict with its phase. Shapes are stored in
+        # apply order; phase 1 owns the first phase_stats[0]['gens_used'],
+        # phase 2 owns the next phase_stats[1]['gens_used'], etc.
+        self._tag_history_with_phase(canvas_data.get('history', []))
+
+        phase_stats = self.phase_state.get_stats_list()
+        # If a phase is still in-progress (mid-run save), append a
+        # provisional record so the active phase is represented in the
+        # output. advance_reason='in_progress' marks it as non-final.
+        if (self.phase_state.gens_in_current > 0 and
+                (not phase_stats
+                 or phase_stats[-1]['phase'] != self.phase_state.current_phase + 1)):
+            phase_stats.append({
+                'phase': self.phase_state.current_phase + 1,
+                'gens_used': self.phase_state.gens_in_current,
+                'match_at_start': self.phase_state._phase_start_match,
+                'match_at_end': self.phase_state._last_match,
+                'clock_time': None,  # not finalized
+                'advance_reason': 'in_progress',
+            })
+
+        output_data = {
+            "version": 2,  # bumped from imagemutate's v1 — adds phase_stats
+            "seed": self.options.get('seed'),
+            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "gen_stop": self.options.get('gen_stop'),
+            "children": self.options.get('children'),
+            "radius": self.options.get('radius'),
+            "shape": self.options.get('shape'),
+            "phase_stats": phase_stats,
+            **canvas_data,
+        }
+        with open(savefile, 'w') as out:
+            out.write(json.dumps(output_data))
+        return savefile
+
+    def print_profiler(self):
+        """Override: print imagemutate's profiler block, then append a per-
+        phase stats table (F6). Called once at evolve() end."""
+        super().print_profiler()
+        if self.phase_state is None:
+            return
+        stats_list = self.phase_state.get_stats_list()
+        if not stats_list:
+            return
+        # Compact table aimed at log readability + scripting.
+        print("===== phase stats =====")
+        header = (
+            f"{'phase':>5}  {'gens':>6}  {'match-start':>11}  "
+            f"{'match-end':>10}  {'clock(s)':>9}  reason"
+        )
+        print(header)
+        print("-" * len(header))
+        for s in stats_list:
+            ct = s['clock_time']
+            ct_str = f"{ct:9.2f}" if ct is not None else f"{'?':>9}"
+            print(
+                f"{s['phase']:>5}  {s['gens_used']:>6}  "
+                f"{s['match_at_start']:>10.3f}%  {s['match_at_end']:>9.3f}%  "
+                f"{ct_str}  {s['advance_reason']}"
+            )
+        print("-" * len(header))
+
+    def _tag_history_with_phase(self, history):
+        """Mutate each shape entry in `history` to include a 'phase' field
+        (1-indexed) based on cumulative gens-per-phase.
+
+        Each history entry is `[opcode, params_dict]` per CanvasAction's
+        __json__ format (canvas.py line 145)."""
+        def _tag(entry, phase_idx):
+            # Defensive: skip entries that aren't the expected
+            # [opcode, params_dict] shape (e.g., future schema changes).
+            if (isinstance(entry, list) and len(entry) >= 2
+                    and isinstance(entry[1], dict)):
+                entry[1]['phase'] = phase_idx
+
+        cumulative = 0
+        for stats in self.phase_state.get_stats_list():
+            gens_in_phase = stats['gens_used']
+            phase_idx = stats['phase']
+            for shape_idx in range(cumulative, cumulative + gens_in_phase):
+                if shape_idx >= len(history):
+                    break
+                _tag(history[shape_idx], phase_idx)
+            cumulative += gens_in_phase
+        # Leftover shapes belong to the in-progress (current) phase.
+        in_progress_phase = self.phase_state.current_phase + 1
+        for shape_idx in range(cumulative, len(history)):
+            _tag(history[shape_idx], in_progress_phase)
 
     def _save_image_with_phase(self, end=False):
         """Save canvas with imagephase's phase-aware naming convention:
