@@ -45,6 +45,9 @@ python tools/filament_stack_to_phases.py \
 | `--deltae-threshold <float>` | `2.3` | CIE 1976 ΔE Just-Noticeable-Difference (JND). Layers within this of the previous recorded phase don't get their own phase. |
 | `--opacity-ceiling <float>` | `0.85` | Per-filament opacity at which iteration stops (asymptotic saturation). |
 | `--include-no-op-layers` | OFF | Disable both the JND-skip and the convergence-stop. Yields the maximum possible phase count for the stack. Use for debugging the cascade or for very expressive renders. |
+| `--nozzle-mm <float>` | OFF | When supplied, activates the nozzle-derived radius schedule (F8). Generates per-phase `--phase-max-radius` + `--phase-min-radius` flags in `phase_run.sh` sized so the smallest top-phase features stay above the printer's minimum reliable tower diameter. Without this flag, no radius schedule is emitted and `imagephase`'s defaults apply. |
+| `--print-max-dim-mm <float>` | `242.0` | Physical max dimension of the printed piece in mm (longest side, orientation-independent). Default is the artist's most common max-dim — override per piece. |
+| `--tower-safety-factor <float>` | `3.0` | Multiplier on `--nozzle-mm` yielding the topmost-phase minimum reliable tower diameter. Default calibrated for Bambu X1C + 0.4mm nozzle at filament-painting conditions (see `CITATIONS.md`). |
 | `--run` | OFF | After generation, invoke `bash phase_run.sh` automatically. Without this, the script just generates and exits — the artist runs the shell script when ready. |
 
 ### How phases get derived
@@ -69,16 +72,46 @@ CIE 2000 (`ciede2000`) is more perceptually uniform but adds ~50 LoC of arithmet
 
 - **Beer-Lambert in sRGB.** Math is applied directly in sRGB rather than linear RGB — matches HueForge's and Kromacut's convention. Slightly less physically accurate than linear-space blending, but the calibration of filament colors + TDs is end-to-end sRGB, so the round-trip works out.
 - **Bottom filament is assumed saturated.** The print's base layers stack to ~100% opacity, so this is safe for any realistic filament-painting configuration. If you want to record bottom-filament layers explicitly, use `--include-no-op-layers`.
-- **`--phase-max-radius` / `--phase-min-radius` not yet derived.** The generated `phase_run.sh` doesn't specify per-phase radii; `imagephase`'s defaults apply. F8 (planned) adds nozzle-derived radius math: smaller features for top-of-stack phases that print as isolated towers.
 - **Per-piece HFP slider schedules are ignored.** Even with `--hfp`, the artist's `slider_values` choice is intentionally not used — F7's contract is "derive from physics, not from the artist's HF choices." For piece-specific schedule overrides, edit `phase_run.sh` directly.
+- **Radius schedule only active with `--nozzle-mm`.** Without that flag, the generated `phase_run.sh` omits `--phase-max-radius` / `--phase-min-radius` and `imagephase`'s defaults apply (which may produce features smaller than the printer can resolve). Always supply `--nozzle-mm` for FDM use.
+
+### Radius schedule (F8 — nozzle-derived)
+
+When `--nozzle-mm` is supplied, per-phase max and min radii are derived from the print's physical constraints rather than guessed. Bottom phases get large strokes (broad color coverage); top phases get small strokes that stay above the printer's minimum reliable feature size.
+
+```
+pixels_per_mm    = image_max_dim_px / print_max_dim_mm
+min_tower_mm     = nozzle_mm × tower_safety_factor
+min_radius_top   = max(2, ceil(min_tower_mm × pixels_per_mm / 2))
+
+max_radius_phase_0 = ceil(print_max_dim_mm × 0.12  × pixels_per_mm)   # ~12% of print max-dim
+max_radius_phase_N = max(min_radius_top × 3,
+                         ceil(print_max_dim_mm × 0.025 × pixels_per_mm))  # ~2.5%
+# linear-interpolated across phases
+
+min_radius_top    = (above)                    # topmost phase only
+min_radius_other  = max(2, floor(min_radius_top × 0.5))
+```
+
+Worked example for horses (242×195mm print, 600×746px target, 0.4mm nozzle, safety 3.0):
+
+- `pixels_per_mm = 746/242 ≈ 3.08`
+- `min_tower_mm = 0.4 × 3.0 = 1.2mm`
+- `min_radius_top = max(2, ceil(1.2 × 3.08 / 2)) = max(2, ceil(1.85)) = 2 px`
+- `max_radius_phase_0 ≈ ceil(242 × 0.12 × 3.08) ≈ 90 px`
+- `max_radius_phase_N ≈ max(6, ceil(242 × 0.025 × 3.08)) = max(6, 19) = 19 px`
+
+If `pixels_per_mm` lands outside the 2.0–5.0 sweet spot (recommended ~3 px/mm), a stderr warning surfaces — too coarse means blocky features; too fine means GA convergence wastes compute with no fidelity gain.
+
+**Tower-safety-factor 3.0 is research-derived**, not empirical for this exact rig. Per CITATIONS.md, three independent strands (HueForge slicer floor, Kromacut default, structural pin minimum guides) converge on 1.0–1.2mm minimum tower diameter for a 0.4mm nozzle, with 1.2mm (factor 3.0) at the upper-safe end of consumer/community consensus. If a future calibration print on the exact Bambu X1C + filament-painting rig produces a refined value, update the default + the citation.
 
 ### Sample output (horses sepia)
 
 ```
 filament_stack_to_phases: 3 phases derived from 3 filaments at layer_height=0.04mm
-  phase  1: #080504  (filament 2 4E3524, layer 2, opacity=0.103, ΔE-to-prior=2.53)
-  phase  2: #0C0805  (filament 2 4E3524, layer 3, opacity=0.150, ΔE-to-prior=2.53)
-  phase  3: #14100D  (filament 3 E5DCC8, layer 2, opacity=0.038, ΔE-to-prior=2.80)
+  phase  1: #080504  (filament 2 4E3524, layer 2, opacity=0.103, ΔE-to-prior=2.53, radius 2-90px)
+  phase  2: #0C0805  (filament 2 4E3524, layer 3, opacity=0.150, ΔE-to-prior=2.53, radius 2-54px)
+  phase  3: #14100D  (filament 3 E5DCC8, layer 2, opacity=0.038, ΔE-to-prior=2.80, radius 2-19px)
 ```
 
-3 phases on a sepia stack (black / dark-brown / off-white) — perceptually similar colors converge quickly. For a stack of bright primaries, expect 6-15 phases.
+3 phases on a sepia stack (black / dark-brown / off-white) — perceptually similar colors converge quickly. For a stack of bright primaries, expect 6-15 phases. Radius columns appear when `--nozzle-mm` is supplied (above run used `--nozzle-mm 0.4 --print-max-dim-mm 242 --tower-safety-factor 3.0`).

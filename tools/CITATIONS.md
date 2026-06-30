@@ -50,3 +50,77 @@ Bibliography for `tools/` calibration defaults. Future maintainers extend this r
 ## JND threshold — 2.3
 
 **Decision:** `2.3` ΔE units, matches Kromacut. Common Just-Noticeable-Difference for CIE 1976 in image-processing literature is in the 1.0–2.5 range depending on viewing conditions; Kromacut's 2.3 sits at the upper end (forgiving — fewer false-distinct calls) and works in production. Adopting their choice means filament-painting decisions translate between tools.
+
+## Tower safety factor — 3.0 (F8)
+
+**Decision:** ship `filament_stack_to_phases` with `--tower-safety-factor 3.0` (= 1.2mm minimum tower diameter on a 0.4mm nozzle) for the topmost-phase shape radius. Conservative range: 2.5–3.0.
+
+**Why:** filament-painting "towers" are short (~1–2mm tall on 0.04mm layers in HRM mode), thermally stable (slow speed, AMS pauses), and adhere on top of a continuous painted base — not isolated on bare bed. So they're more forgiving than the generic "isolated functional pin" case (where 3mm is recommended). Sub-line-width features are silently dropped by the slicer (HueForge FAQ). 1.2mm sits at the intersection of the conservative-but-still-printable threshold and filament-painting-specific tolerances.
+
+### Sources consulted
+
+#### HueForge Wiki — FAQ
+
+- **URL:** https://hueforge.wiki/index.php/FAQ
+- **Accessed:** 2026-06-29
+- **Relevant extract:** "Portions of the image that are generally thinner than your line width will be ignored by the slicer and therefore will have one or two fewer layers than what HueForge expects due to these spikes."
+- **Relevance:** Establishes the absolute slicer floor — features < line width (~0.42mm Bambu default) are silently dropped. Sets safety_factor lower bound at ~1.0× nozzle.
+
+#### Kromacut — `dither line width` default
+
+- **URL:** https://github.com/vycdev/Kromacut
+- **Accessed:** 2026-06-29
+- **Relevant extract:** "Dither line width ... Controls the minimum dot size for the dither pattern in mm. This should roughly match your printer's line/nozzle width so dither dots are actually printable. **Default: 0.42 mm**."
+- **Relevance:** Sibling tool's empirical default for minimum printable dot on a 0.4mm nozzle = line width (factor ≈ 1.05). This is the slicer-resolved floor, not a safe tower minimum.
+
+#### Voxel Magic — Minimum Requirements for PLA / PETG / ABS
+
+- **URL:** https://voxel-magic.com/minimum-requirements-for-making-your-design-3d-printable-in-pla-petg-and-abs
+- **Accessed:** 2026-06-29
+- **Relevant extract:** "For pins/tabs with a 0.4 mm nozzle, the thickness should be ≥ 1.2 mm with a length ≥ 2.0 mm ... minimum vertical-wire diameter of 1.2 mm is recommended to ensure stability."
+- **Relevance:** Direct empirical recommendation: vertical pin min = 1.2mm on a 0.4mm nozzle. Factor = 3.0. Primary anchor for the chosen default.
+
+#### Pollen AM — Minimum Feature Size
+
+- **URL:** https://www.pollen.am/design_for_3d_printing_minimum_feature_size/
+- **Accessed:** 2026-06-29
+- **Relevant extract:** "The minimum reliable pin diameter is 1mm. However, a pin can be designed to 0.8mm, but even then, risk breaking."
+- **Relevance:** Lower-bound corroboration — 1.0mm is the edge of reliability; 0.8mm is risky. Factor 2.5 is the lowest defensible.
+
+#### Protolabs / Hubs — FDM design guide
+
+- **URL:** https://www.hubs.com/knowledge-base/how-design-parts-fdm-3d-printing/
+- **Accessed:** 2026-06-29
+- **Relevant extract:** "Vertical pins with a diameter under 3 mm will probably deform when printed ... Pins should be at least 1 mm in diameter and kept as short as possible."
+- **Relevance:** Conservative industrial guide (3mm). Applies to functional pins of meaningful height, not 1–2mm filament-painting tower nubs. Justifies NOT picking factor 7.5 — that's overkill for this use case.
+
+#### Mandarin3D — Wall Thickness Guide
+
+- **URL:** https://mandarin3d.com/blog/wall-thickness-guide-minimum-and-optimal-measurements
+- **Accessed:** 2026-06-29
+- **Relevant extract:** "Wall thickness should be a multiple of your nozzle diameter, with a 0.4mm nozzle working best with walls that are 0.8mm, 1.2mm, 1.6mm ..."
+- **Relevance:** 1.2mm = 3-line wall, common slicer-friendly minimum for closed perimeters. Cross-validates factor 3.0 from a different angle (perimeter packing rather than pin stability).
+
+#### Bambu Lab Forum — Default Line Width of 0.42
+
+- **URL:** https://forum.bambulab.com/t/default-line-width-of-0-42/20400
+- **Accessed:** 2026-06-29
+- **Relevant extract:** "Default line width 0.42mm for 0.4mm nozzle."
+- **Relevance:** Confirms actual extruded line width on the target machine. Establishes slicer-dropped-feature floor at ~0.42mm.
+
+### Convergence assessment
+
+**Convergent.** Three independent strands — HueForge slicer floor ~0.42mm, Kromacut default 0.42mm, structural pin minimum 1.0–1.2mm — all point to a defensible tower minimum in the 1.0–1.2mm band on a 0.4mm nozzle. **1.2mm (factor 3.0)** is the upper-safe end of the consumer/community consensus and matches the placeholder. NO empirical print-test calibration improvement entry needed (per plan §9 decision tree case 1: convergent research → use median; placeholder retained).
+
+### What was NOT chosen
+
+- **Factor 1.0–1.5 (0.4–0.6mm):** equals raw line width / slicer floor. Prints will *attempt* features but reliability drops sharply; doesn't account for short-tower wobble during AMS swap pauses.
+- **Factor 2.0 (0.8mm):** Pollen AM and Voxel Magic both flag this as risky / breakage-prone. Too aggressive for a default.
+- **Factor 5.0–7.5 (2.0–3.0mm):** Protolabs / Hubs industrial guideline. Aimed at functional pins with height >> diameter that must survive handling. Filament-painting "towers" are 1–2mm tall and supported by the painted base below; this would suppress legitimate detail.
+- **Smaller nozzle (0.2mm) recommendations:** out of scope; the constraint is X1C + 0.4mm.
+
+## Print max-dim — 242mm (F8)
+
+**Decision:** ship `filament_stack_to_phases` with `--print-max-dim-mm 242.0` default. NOT a universal value — overridden per piece. Chosen as the artist's most common max-dim across their pieces (e.g., wolves 242×206, depose 229×201, harrington 242×161). Pieces outside this nominal scale (mechEng 250×141, encre_marquet ~200) need the explicit override flag.
+
+No external sources consulted — this is a piece-set median, not a calibration. Documented here so future maintainers don't mistake it for a research-derived value.
