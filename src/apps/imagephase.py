@@ -50,6 +50,9 @@ class App(MutateApp):
     phase_state = None
     phase_brush_surfaces = None
     _final_phase_complete = False
+    # F9: per-stroke frame dump. Monotonic counter across the whole run
+    # (every winning-child + every phase-pause replica advances it).
+    _frame_counter = 0
 
     def __init__(self, options=None):
         super().__init__(options)
@@ -220,6 +223,10 @@ class App(MutateApp):
 
         super().handle_evolution_tick(tick)
 
+        # F9: per-stroke frame dump (after the winning child has been applied
+        # to canvas). No-op when --frames-dir is not set.
+        self._save_stroke_frame()
+
         # Record match-% after the winning child was applied.
         score = match_score(self.target_surface, self.canvas.surface)
         pct = get_match_percentage(score)
@@ -260,6 +267,12 @@ class App(MutateApp):
             )
             self._final_phase_complete = True
             return
+
+        # F9: bake the phase boundary into the frame sequence as held copies.
+        # Fires only on inter-phase transitions (the final phase's completion
+        # is not a transition since there's nothing to transition to — its
+        # last-frame state is already captured as the last stroke frame).
+        self._save_phase_pause_frames()
 
         old_phase = self.phase_state.current_phase
         self.phase_state.advance()
@@ -426,6 +439,52 @@ class App(MutateApp):
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         pygame.image.save(self.canvas.surface, path)
         return path
+
+    def _frames_dir(self):
+        """Return frames-dir Path if --frames-dir is set and a canvas exists,
+        else None. Centralizes the no-op guard for F9 hooks."""
+        frames_dir = self.options.get('frames_dir')
+        if not frames_dir:
+            return None
+        if self.canvas is None or self.canvas.surface is None:
+            return None
+        return frames_dir
+
+    def _frame_path(self, frames_dir):
+        """Build the next frame's path. Advances the monotonic counter."""
+        prefix = (self.options.get('prefix')
+                  or self.get_default_save_file_prefix())
+        name = f"{prefix}-frame-{self._frame_counter:07d}.png"
+        self._frame_counter += 1
+        return os.path.join(frames_dir, name)
+
+    def _save_stroke_frame(self):
+        """F9: write the post-winning-child canvas state as one frame in the
+        movie sequence. No-op when --frames-dir is unset."""
+        frames_dir = self._frames_dir()
+        if frames_dir is None:
+            return None
+        os.makedirs(frames_dir, exist_ok=True)
+        path = self._frame_path(frames_dir)
+        pygame.image.save(self.canvas.surface, path)
+        return path
+
+    def _save_phase_pause_frames(self):
+        """F9: write N replicas of the current canvas at a phase boundary so
+        playback shows a visible pause at the transition. N is taken from
+        --phase-pause-frames (default 0 = no pause). No-op when --frames-dir
+        is unset or pauses == 0."""
+        frames_dir = self._frames_dir()
+        if frames_dir is None:
+            return 0
+        n = int(self.options.get('phase_pause_frames') or 0)
+        if n <= 0:
+            return 0
+        os.makedirs(frames_dir, exist_ok=True)
+        for _ in range(n):
+            path = self._frame_path(frames_dir)
+            pygame.image.save(self.canvas.surface, path)
+        return n
 
     def render_hud(self, surface):
         """Override: draw a phase-info bar above imagemutate's existing HUD bar.
