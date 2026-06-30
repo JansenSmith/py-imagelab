@@ -164,6 +164,29 @@ PHASE final reason=plateau gens=611 match-end=91.834%
 
 **Checkpoint files:** imagephase image saves include the active phase in the filename: `<prefix>-c<C>-p<P>-g<G>.png` (periodic via `-o N`, `--save-on-exit`, and hotkey saves all use this pattern). When `-o N` is active, an EXTRA save fires at every phase boundary regardless of the modulo schedule, named `<prefix>-c<C>-p<P>-end-g<G>.png`. The `-end-` marker makes phase transitions easy to spot in `ls` output and easy to assemble into a phase-by-phase time-lapse externally (`ffmpeg -i ...-end-g*.png ...`).
 
+**Stats output:** at every phase advance, imagephase emits a structured stderr line:
+
+```
+PHASE advance N→N+1 reason=<plateau|max_gens> gens=<G> match-start=<%> match-end=<%> window-delta=<value>
+```
+
+At run end, a per-phase stats table is printed to stdout (one row per phase: phase index, gens used, match-% at start, match-% at end, clock time in seconds, advance reason). When `-i` (instructions / JSON output) is set, the same per-phase records are written into the JSON as a top-level `phase_stats` array, AND each shape in the canvas history gets a `phase: int` field tagging its originating phase (1-indexed). JSON schema bumps to `version: 2` when phase mode is active.
+
+`phase_stats[i]` schema:
+
+```json
+{
+  "phase": 1,
+  "gens_used": 137,
+  "match_at_start": 0.012,
+  "match_at_end": 0.421,
+  "clock_time": 12.34,
+  "advance_reason": "plateau"
+}
+```
+
+`advance_reason` ∈ `{"plateau", "max_gens", "in_progress"}`. `"in_progress"` appears only for the current (unfinalized) phase if you save mid-run; `clock_time` is `null` in that case.
+
 ### imagereplay
 
 Replay a saved instructions file (`.json` output from `imagemutate -i`).
