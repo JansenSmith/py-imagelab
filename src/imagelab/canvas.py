@@ -8,8 +8,34 @@ import base64
 import gzip
 import os
 import pygame
+import numpy as np
 from imagelab.constants import SHAPE_CIRCLE
 from imagelab.geometry import get_polygon
+
+
+def _jsonsafe(value):
+    """Recursively convert numpy scalar/array types to native Python types
+    so json.dumps can serialize them.
+
+    numpy.integer / numpy.floating are returned by numpy random APIs and
+    by per-channel arithmetic; without this conversion json.dumps raises
+    `TypeError: Object of type int64 is not JSON serializable`. The bug
+    is triggered any time a canvas action's params dict contains a numpy
+    scalar (e.g. `pos`, `radius`, `rotation` from rng.integers), which is
+    every shape produced by mutate_evolve."""
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, tuple):
+        return tuple(_jsonsafe(v) for v in value)
+    if isinstance(value, list):
+        return [_jsonsafe(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _jsonsafe(v) for k, v in value.items()}
+    return value
 
 CANVAS_FONT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "assets", "fonts", "luculent", "luculent.ttf")
 
@@ -141,7 +167,19 @@ class CanvasAction(ABC):
         return {id(self.params[key]): self.serialize_binary_param(key, self.params[key]) for key in self.params if self.params[key] is not None and key in self._binary_params}
 
     def __json__(self):
-        filtered_params = {key: (self.params[key] if self.params[key] is None or key not in self._binary_params else id(self.params[key])) for key in self.params }
+        filtered_params = {
+            key: (
+                # Binary-flagged params get replaced by their id() (the
+                # actual bytes live in binary_map).
+                id(self.params[key])
+                if (self.params[key] is not None
+                    and key in self._binary_params)
+                # Non-binary params get jsonsafe-converted to handle numpy
+                # scalars / arrays. Plain Python values pass through.
+                else _jsonsafe(self.params[key])
+            )
+            for key in self.params
+        }
         return [self.opcode, filtered_params]
 
     @abstractmethod
