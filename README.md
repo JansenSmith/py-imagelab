@@ -187,6 +187,32 @@ At run end, a per-phase stats table is printed to stdout (one row per phase: pha
 
 `advance_reason` ∈ `{"plateau", "max_gens", "in_progress"}`. `"in_progress"` appears only for the current (unfinalized) phase if you save mid-run; `clock_time` is `null` in that case.
 
+**Stroke-movie capture:** opt-in per-stroke frame dump for assembling a layer-by-layer time-lapse. When `--frames-dir <path>` is set, imagephase writes one PNG per winning child (the canvas state immediately after each stroke is applied) named `<prefix>-frame-NNNNNNN.png` (7-digit zero-pad, monotonic across the whole run). `--phase-pause-frames N` adds N replicas of the boundary frame at every inter-phase transition, baking visible pauses into playback (e.g. `N=30` at 30fps = 1 second hold per transition; the final phase's completion is not a transition so it gets no pause).
+
+```bash
+imagephase target.png \
+  --start-canvas seed.png \
+  --phases 3 --phase-brushes p1.png p2.png p3.png \
+  --frames-dir ./run_frames/ \
+  --phase-pause-frames 30 \
+  -S triangle -j 8 -c 50 -p movie
+```
+
+**Storage cost is significant.** A 20K-gen run × ~200KB per frame is ~4GB on disk. Use deliberately on real runs; consider downscaling the target image or running with tighter `--phase-max-gens` for first-time experiments.
+
+Assemble into mp4 via the bundled wrapper or plain ffmpeg:
+
+```bash
+# bundled (validates the frame sequence, picks safe codec defaults)
+python tools/assemble_stroke_movie.py --frames-dir ./run_frames/ --output ./movie.mp4
+
+# or directly
+ffmpeg -framerate 30 -i ./run_frames/movie-frame-%07d.png \
+  -c:v libx264 -pix_fmt yuv420p ./movie.mp4
+```
+
+Frames-dir output co-exists with `--save-gen` periodic / `--save-on-exit` PNG saves and `-i` JSON output — F9 is purely additive. Default is OFF; no frames written unless `--frames-dir` is set.
+
 ### imagereplay
 
 Replay a saved instructions file (`.json` output from `imagemutate -i`).
