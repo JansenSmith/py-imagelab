@@ -233,11 +233,13 @@ def test_cli_horses_sepia_generates_outputs(fstp_cmd, target_64x64, tmp_path):
 
     # phases.json parseable + has expected structure.
     doc = json.loads(phases_json.read_text())
-    assert doc["version"] == 1
+    assert doc["version"] == 2
     assert doc["layer_height_mm"] == pytest.approx(0.04)
     assert doc["deltae_formula"] == "CIE-1976"
     assert len(doc["filaments"]) == 3
     assert len(doc["phases"]) >= 1
+    # Without --nozzle-mm, no radius_schedule block.
+    assert "radius_schedule" not in doc
     # Brush PNG count matches phase count.
     brush_pngs = sorted(brushes_dir.glob("phase_*.png"))
     assert len(brush_pngs) == len(doc["phases"])
@@ -363,3 +365,178 @@ def test_cli_phase_run_sh_has_valid_invocation(fstp_cmd, target_64x64, tmp_path)
 
 
 import os  # noqa: E402 — used in test_cli_horses_sepia_generates_outputs
+
+
+# ---------- F8: nozzle-derived radius schedule ----------
+
+class TestDeriveRadiusSchedule:
+    """Unit coverage for `derive_radius_schedule`."""
+
+    def test_horses_portrait_canonical(self):
+        """Plan §9 acceptance — horses (242mm max-dim, image_max_dim_px=746,
+        nozzle 0.4mm, safety 3.0)."""
+        max_r, min_r = fstp.derive_radius_schedule(
+            n_phases=3,
+            image_max_dim_px=746,
+            print_max_dim_mm=242.0,
+            nozzle_mm=0.4,
+            tower_safety_factor=3.0,
+        )
+        assert len(max_r) == 3 and len(min_r) == 3
+        # min_radius_top: max(2, ceil(0.4 * 3.0 * (746/242) / 2))
+        #              = max(2, ceil(1.849)) = max(2, 2) = 2
+        assert min_r[-1] == 2
+        # max_radius_phase_0 ≈ ceil(242 * 0.12 * 3.0826) ≈ ceil(89.52) = 90
+        assert max_r[0] == 90
+        # max_radius_phase_N ≈ max(2*3, ceil(242 * 0.025 * 3.0826))
+        #                   ≈ max(6, ceil(18.65)) = max(6, 19) = 19
+        assert max_r[-1] == 19
+        # mid-phase is the linear-interpolation midpoint of 90 → 19
+        assert max_r[1] == round(90 + (19 - 90) * 0.5)  # = 55
+        # min_radius_other = max(2, floor(2 * 0.5)) = max(2, 1) = 2
+        assert min_r[0] == 2
+
+    def test_safety_factor_linear_in_min_tower(self):
+        _, min_r_3 = fstp.derive_radius_schedule(
+            3, 746, 242.0, 0.4, 3.0,
+        )
+        _, min_r_6 = fstp.derive_radius_schedule(
+            3, 746, 242.0, 0.4, 6.0,
+        )
+        # Double safety factor → roughly double min_radius_top.
+        # min_top@3 = max(2, ceil(1.849)) = 2
+        # min_top@6 = max(2, ceil(3.699)) = 4
+        assert min_r_3[-1] == 2
+        assert min_r_6[-1] == 4
+
+    def test_landscape_same_as_portrait_when_max_dim_matches(self):
+        """Orientation-independence: 746px max-dim should yield same
+        pixels_per_mm whether portrait (W=600,H=746) or landscape
+        (W=746,H=600). The helper takes a max-dim scalar, so this
+        is verified at the call site — confirm here that the scalar
+        is what matters."""
+        a_max, a_min = fstp.derive_radius_schedule(
+            5, 746, 242.0, 0.4, 3.0,
+        )
+        b_max, b_min = fstp.derive_radius_schedule(
+            5, 746, 242.0, 0.4, 3.0,
+        )
+        assert a_max == b_max
+        assert a_min == b_min
+
+    def test_max_radius_monotonically_decreases(self):
+        """Bottom phases paint big strokes; top phases paint small ones."""
+        max_r, _ = fstp.derive_radius_schedule(
+            5, 1000, 242.0, 0.4, 3.0,
+        )
+        # Linear interpolation should produce monotonic non-increasing series.
+        for i in range(len(max_r) - 1):
+            assert max_r[i] >= max_r[i + 1], (
+                f"max-radius should not grow with phase: {max_r}"
+            )
+
+    def test_single_phase(self):
+        max_r, min_r = fstp.derive_radius_schedule(
+            1, 746, 242.0, 0.4, 3.0,
+        )
+        assert len(max_r) == 1 and len(min_r) == 1
+        # Single phase → use top values directly.
+        assert min_r[0] == 2
+
+    def test_rejects_zero_phases(self):
+        with pytest.raises(ValueError):
+            fstp.derive_radius_schedule(0, 746, 242.0, 0.4, 3.0)
+
+    def test_rejects_nonpositive_inputs(self):
+        with pytest.raises(ValueError):
+            fstp.derive_radius_schedule(3, 0, 242.0, 0.4, 3.0)
+        with pytest.raises(ValueError):
+            fstp.derive_radius_schedule(3, 746, 242.0, 0, 3.0)
+        with pytest.raises(ValueError):
+            fstp.derive_radius_schedule(3, 746, 242.0, 0.4, 0)
+
+
+class TestPixelsPerMmWarning:
+    def test_within_band_no_warning(self):
+        assert fstp.pixels_per_mm_warning(3.0) is None
+        assert fstp.pixels_per_mm_warning(2.0) is None
+        assert fstp.pixels_per_mm_warning(5.0) is None
+
+    def test_below_band_warns_blocky(self):
+        w = fstp.pixels_per_mm_warning(1.5)
+        assert w and "blocky" in w
+
+    def test_above_band_warns_slow(self):
+        w = fstp.pixels_per_mm_warning(8.0)
+        assert w and ("slow" in w or "convergence" in w)
+
+
+def test_cli_radius_schedule_active_when_nozzle_supplied(
+    fstp_cmd, target_64x64, tmp_path
+):
+    """--nozzle-mm activates F8: phases.json has radius_schedule block,
+    phase_run.sh emits --phase-max-radius / --phase-min-radius."""
+    out_dir = tmp_path / "out"
+    result = subprocess.run(
+        fstp_cmd + [
+            "--target", str(target_64x64),
+            "--layer-height", "0.04",
+            "--filament", "000000:0.3",
+            "--filament", "4E3524:1.7",
+            "--filament", "E5DCC8:4.8",
+            "--out-dir", str(out_dir),
+            "--nozzle-mm", "0.4",
+            "--print-max-dim-mm", "100",  # 64px / 100mm = 0.64 px/mm — will warn
+            "--tower-safety-factor", "3.0",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    # Sub-band pixels_per_mm → blocky warning on stderr.
+    assert "blocky" in result.stderr or "warning" in result.stderr.lower()
+
+    doc = json.loads((out_dir / "phases.json").read_text())
+    assert "radius_schedule" in doc
+    rs = doc["radius_schedule"]
+    assert rs["nozzle_mm"] == 0.4
+    assert rs["print_max_dim_mm"] == 100.0
+    assert rs["tower_safety_factor"] == 3.0
+    assert len(rs["max_radii_px"]) == len(doc["phases"])
+    assert len(rs["min_radii_px"]) == len(doc["phases"])
+
+    sh = (out_dir / "phase_run.sh").read_text()
+    assert "--phase-max-radius" in sh
+    assert "--phase-min-radius" in sh
+
+
+def test_cli_no_nozzle_omits_radius_schedule(
+    fstp_cmd, target_64x64, tmp_path
+):
+    """Without --nozzle-mm, F8 stays inactive: no radius_schedule in JSON,
+    no --phase-{max,min}-radius flags in shell script (F7 behavior preserved)."""
+    out_dir = tmp_path / "out"
+    result = subprocess.run(
+        fstp_cmd + [
+            "--target", str(target_64x64),
+            "--layer-height", "0.04",
+            "--filament", "000000:0.3",
+            "--filament", "4E3524:1.7",
+            "--filament", "E5DCC8:4.8",
+            "--out-dir", str(out_dir),
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    doc = json.loads((out_dir / "phases.json").read_text())
+    assert "radius_schedule" not in doc
+    sh = (out_dir / "phase_run.sh").read_text()
+    assert "--phase-max-radius" not in sh
+    assert "--phase-min-radius" not in sh
+
+
+def test_cli_defaults_match_documented_values(fstp_cmd, target_64x64, tmp_path):
+    """Tower safety factor + print-max-dim defaults match the calibrated
+    values (per tools/CITATIONS.md). Regression sentinel — change the
+    default ⇒ change this assertion ⇒ surface in PR review."""
+    assert fstp.DEFAULT_TOWER_SAFETY_FACTOR == 3.0
+    assert fstp.DEFAULT_PRINT_MAX_DIM_MM == 242.0
