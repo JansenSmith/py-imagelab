@@ -180,7 +180,7 @@ def test_hfp_parsing(tmp_path):
             {"Color": "#000000", "Transmissivity": 0.3, "Name": "Black"},
         ]
     }))
-    lh, fils = fstp._load_filaments_from_hfp(str(hfp))
+    lh, fils, max_thicknesses = fstp._load_filaments_from_hfp(str(hfp))
     assert lh == pytest.approx(0.04)
     # Bottom-up order: first item should be black.
     assert fils[0].hex == "#000000"
@@ -188,6 +188,35 @@ def test_hfp_parsing(tmp_path):
     assert fils[2].hex == "#E5DCC8"
     assert fils[0].td == pytest.approx(0.3)
     assert fils[2].name == "Bone White"
+    # No slider_values in this fixture → max_thicknesses is None.
+    assert max_thicknesses is None
+
+
+def test_hfp_parsing_with_slider_values(tmp_path):
+    """When slider_values is present, HFP reader returns per-filament max
+    thicknesses computed as Z-delta from previous filament's top."""
+    hfp = tmp_path / "horses_synthetic.hfp"
+    # slider_values in HFP convention (top→bottom) — matches horses sepia:
+    #   Bone White top at 0.84mm, Flesh top at 0.36mm, Black top at 0.16mm.
+    hfp.write_text(json.dumps({
+        "layer_height": 0.04,
+        "filament_set": [
+            {"Color": "#E5DCC8", "Transmissivity": 4.8, "Name": "Bone White"},
+            {"Color": "#4E3524", "Transmissivity": 1.7, "Name": "Flesh"},
+            {"Color": "#000000", "Transmissivity": 0.3, "Name": "Black"},
+        ],
+        "slider_values": [0.84, 0.36, 0.16],
+    }))
+    lh, fils, max_thicknesses = fstp._load_filaments_from_hfp(str(hfp))
+    assert max_thicknesses is not None
+    assert len(max_thicknesses) == 3
+    # Print-order:
+    # Black (bottom): max thickness = slider_values[0] = 0.16mm
+    # Flesh:          0.36 - 0.16 = 0.20mm
+    # Bone White:     0.84 - 0.36 = 0.48mm
+    assert max_thicknesses[0] == pytest.approx(0.16)
+    assert max_thicknesses[1] == pytest.approx(0.20)
+    assert max_thicknesses[2] == pytest.approx(0.48)
 
 
 def test_hfp_parsing_missing_file_raises(tmp_path):

@@ -391,21 +391,36 @@ def _parse_filament_arg(s):
 
 
 def _load_filaments_from_hfp(hfp_path):
-    """Parse a HueForge .hfp JSON file. Returns (layer_height, filaments).
+    """Parse a HueForge .hfp JSON file.
+    Returns (layer_height, filaments, max_thicknesses_mm).
 
     HFP `filament_set` JSON list order is reversed from print order:
     index 0 is the TOP filament; the last is the BOTTOM. We reverse to
     get print order (bottom-up).
 
-    Does NOT use `slider_values` — the F7 contract is "derive phases from
-    Beer-Lambert convergence," ignoring the HFP artist's swap schedule.
+    HFP `slider_values` array is aligned with filament_set (also top→bottom):
+    each entry is the Z-height at which that filament STOPS being deposited
+    (i.e., the top of its stack in the color-transition zone). We reverse
+    alongside filament_set and compute per-filament max thickness as the
+    Z-delta from the previous filament's top: `slider_values[i] - slider_values[i-1]`
+    (bottom filament's max = slider_values[0]).
+
+    For horses sepia (slider_values reversed to print order [0.16, 0.36, 0.84]):
+      black:      0.16mm (canvas — F7 skips this iteration anyway)
+      flesh:      0.36 - 0.16 = 0.20mm  (5 layers @ 0.04mm)
+      bone white: 0.84 - 0.36 = 0.48mm  (12 layers @ 0.04mm)
+
+    Total non-canvas layers: 17. F7 records each as one phase.
     """
     with open(hfp_path, 'r') as f:
         data = json.load(f)
     layer_height = float(data.get('layer_height') or 0.04)
     filament_set = data.get('filament_set') or []
-    # Reverse to print order:
+    slider_values = data.get('slider_values') or []
+
+    # Reverse both to print order (bottom → top).
     filaments = []
+    print_order_sliders = list(reversed(slider_values))
     for f in reversed(filament_set):
         hex_color = f.get('Color') or f.get('color')
         td = f.get('Transmissivity') or f.get('transmissivity') or f.get('TD')
@@ -418,7 +433,21 @@ def _load_filaments_from_hfp(hfp_path):
         raise ValueError(
             f"no filaments parseable from HFP: {hfp_path}"
         )
-    return layer_height, filaments
+
+    # Compute per-filament max thickness from slider_values (in print order).
+    # max_thicknesses[fi] = slider_values[fi] - slider_values[fi-1] for fi >= 1;
+    # bottom filament's max = slider_values[0].
+    max_thicknesses = None
+    if print_order_sliders and len(print_order_sliders) >= len(filaments):
+        max_thicknesses = []
+        for i in range(len(filaments)):
+            if i == 0:
+                max_thicknesses.append(float(print_order_sliders[0]))
+            else:
+                delta = float(print_order_sliders[i]) - float(print_order_sliders[i - 1])
+                max_thicknesses.append(delta)
+
+    return layer_height, filaments, max_thicknesses
 
 
 def get_arg_parser():
@@ -593,13 +622,17 @@ def run():
     parser = get_arg_parser()
     args = parser.parse_args()
 
+    args._hfp_max_thicknesses = None
     if args.hfp:
         try:
-            hfp_layer_h, hfp_filaments = _load_filaments_from_hfp(args.hfp)
+            hfp_layer_h, hfp_filaments, hfp_max_thicknesses = (
+                _load_filaments_from_hfp(args.hfp)
+            )
         except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
             print(f"error: failed to read --hfp {args.hfp!r}: {exc}",
                   file=sys.stderr)
             sys.exit(1)
+        args._hfp_max_thicknesses = hfp_max_thicknesses
         if args.layer_height is None:
             args.layer_height = hfp_layer_h
         if not args.filaments:
