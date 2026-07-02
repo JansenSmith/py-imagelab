@@ -179,59 +179,62 @@ class DerivedPhase:
         }
 
 
-def derive_phases(filaments, layer_height_mm,
-                  deltae_threshold=DEFAULT_DELTAE_THRESHOLD,
-                  opacity_ceiling=DEFAULT_OPACITY_CEILING,
-                  include_no_op_layers=False,
+def derive_phases(filaments, layer_height_mm, max_thicknesses_mm,
                   deltae_fn=deltaE_76):
     """Walk filament stack bottom-up. Return a list of DerivedPhase.
 
-    The bottom filament is assumed pre-saturated — the print's base layers
-    stack to ~100% opacity, so the visible color is the bottom filament's
-    pure hex. We start the canvas at that color and don't add a phase for
-    the bottom filament itself unless `include_no_op_layers` is set.
+    HFP-driven (Path B): each non-bottom filament iterates layer-by-layer
+    to its HFP-supplied `max_thicknesses_mm[fi]`, and EVERY iterated layer
+    is recorded as a phase. For horses sepia HFP (slider values yielding
+    max thicknesses [0.16, 0.20, 0.48] mm for [black, flesh, bone white]),
+    this produces EXACTLY 17 phases (5 flesh + 12 bone white), with colors
+    matching HF's per-layer Beer-Lambert predictions.
 
-    For each filament above the bottom, iterate layer-by-layer applying
-    Beer-Lambert against a FIXED `under_rgb` (the color of the stack below
-    this filament — i.e., the previous filament's final rendered color, or
-    the bottom-filament canvas for filament[1]). Record a phase whenever
-    the new layer's color differs from the last recorded color by ≥ ΔE
-    threshold. Stop when (a) opacity ceiling reached OR (b) we've recorded
-    at least one phase AND the latest layer is within threshold of the
-    last recorded color (perceptual convergence).
+    The bottom filament is assumed pre-saturated (the print's base layers
+    stack to ~100% opacity thanks to the piece's backing), so its layers
+    are skipped — the canvas starts at its pure hex.
+
+    For each filament above the bottom, iterate applying Beer-Lambert
+    against a FIXED `under_rgb` (the color at the top of the previous
+    filament's stack — actual last-layer color, not last recorded phase).
+    Each iteration records a phase. Iteration stops at max_thicknesses_mm[fi].
+
+    Rationale for recording every layer (dropping the JND-skip that was
+    previously here): HF's per-pixel algorithm decides different Z-slice
+    colors per pixel, and imagephase needs the full palette to reproduce
+    that range. See art/imagelab-rendering-bugs.md#bug-4 and the empirical
+    HF data in tools/CITATIONS.md.
     """
     if len(filaments) < 1:
         raise ValueError("at least one filament required")
     if layer_height_mm <= 0:
         raise ValueError(f"layer_height must be > 0, got {layer_height_mm}")
+    if max_thicknesses_mm is None:
+        raise ValueError(
+            "max_thicknesses_mm is required (Path B / HFP-driven). "
+            "F7 no longer supports physics-only fallback; supply --hfp "
+            "or explicit per-filament max thicknesses."
+        )
+    if len(max_thicknesses_mm) < len(filaments):
+        raise ValueError(
+            f"max_thicknesses_mm has {len(max_thicknesses_mm)} entries but "
+            f"there are {len(filaments)} filaments; expected one per filament"
+        )
 
-    # canvas_rgb = the last RECORDED phase color (or initial bottom
-    # filament for the first iteration). Used for distinctness check —
-    # "is this new layer different enough from the last recorded phase
-    # to deserve its own phase?"
     canvas_rgb = filaments[0].rgb
     phases = []
     phase_counter = 0
 
     for fi, fil in enumerate(filaments):
-        # Skip bottom filament unless include_no_op (every layer of it
-        # blends to canvas_rgb itself — no visible change).
-        if fi == 0 and not include_no_op_layers:
+        # Skip bottom filament — it IS the canvas.
+        if fi == 0:
             continue
 
         # under_rgb stays fixed for this filament's whole sweep — it's the
-        # color of the stack BELOW this filament. Beer-Lambert at each
-        # cumulative thickness gives the visible color when looking through
-        # `thickness` mm of this filament on top of `under_rgb`.
+        # actual last-layer color at the top of the previous filament's stack.
         under_rgb = canvas_rgb
-
-        # prev_layer_rgb = the previous LAYER's color (any layer, recorded
-        # or not). Used for convergence check — "did this iteration's color
-        # change enough from the prior iteration to make further iteration
-        # worthwhile?" Note: None on iter 1 so the convergence check is
-        # skipped on the first layer.
-        prev_layer_rgb = None
-        last_layer_rgb = None  # for carry-forward to next filament
+        max_thickness = float(max_thicknesses_mm[fi])
+        last_layer_rgb = under_rgb
         intra = 0
 
         while True:
@@ -241,40 +244,33 @@ def derive_phases(filaments, layer_height_mm,
             layer_rgb = beer_lambert_blend(fil.rgb, opacity, under_rgb)
             last_layer_rgb = layer_rgb
 
-            # Distinctness check (against last recorded phase): is this
-            # layer perceptually distinguishable from the prior recorded
-            # phase color? If yes, record it.
-            de_from_canvas = deltae_fn(layer_rgb, canvas_rgb)
-            if de_from_canvas >= deltae_threshold or include_no_op_layers:
-                phase_counter += 1
-                phases.append(DerivedPhase(
-                    phase_idx=phase_counter,
-                    filament_idx=fi,
-                    intra_filament_layer=intra,
-                    cumulative_thickness=thickness,
-                    opacity=opacity,
-                    rgb=layer_rgb,
-                    delta_e_to_prior=de_from_canvas,
-                ))
-                canvas_rgb = layer_rgb
+            # Record every iterated layer as a phase (Path B: no JND skip).
+            phase_counter += 1
+            phases.append(DerivedPhase(
+                phase_idx=phase_counter,
+                filament_idx=fi,
+                intra_filament_layer=intra,
+                cumulative_thickness=thickness,
+                opacity=opacity,
+                rgb=layer_rgb,
+                delta_e_to_prior=deltae_fn(layer_rgb, canvas_rgb),
+            ))
+            canvas_rgb = layer_rgb
 
-            # Convergence check (against prev LAYER): is this iteration's
-            # color change too small to make further iteration worthwhile?
-            # Skipped on layer 1 (no prior layer to compare to).
-            if (prev_layer_rgb is not None
-                    and not include_no_op_layers):
-                de_consecutive = deltae_fn(layer_rgb, prev_layer_rgb)
-                if de_consecutive < deltae_threshold:
-                    break
-
-            # Opacity ceiling: filament is asymptotically saturated.
-            if opacity >= opacity_ceiling:
+            # Stop when we've reached HFP's assigned thickness for this filament.
+            if thickness >= max_thickness - 1e-9:
                 break
             # Safety net.
             if intra > 1000:
                 break
 
-            prev_layer_rgb = layer_rgb
+        # Inter-filament transition: propagate the actual top-of-stack color
+        # (last iterated layer) — see A.5 in the DCCATL plan. This is
+        # subtly different from canvas_rgb, which tracks the last recorded
+        # phase; under Path B those are the same since every layer is
+        # recorded, but leaving the explicit assignment for correctness
+        # and clarity.
+        canvas_rgb = last_layer_rgb
 
     return phases
 
@@ -651,13 +647,11 @@ def run():
               file=sys.stderr)
         sys.exit(1)
 
-    # Derive phases.
+    # Derive phases (Path B: HFP-driven, requires max_thicknesses_mm).
     try:
         phases = derive_phases(
             args.filaments, args.layer_height,
-            deltae_threshold=args.deltae_threshold,
-            opacity_ceiling=args.opacity_ceiling,
-            include_no_op_layers=args.include_no_op_layers,
+            max_thicknesses_mm=args._hfp_max_thicknesses,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

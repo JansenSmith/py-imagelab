@@ -101,55 +101,78 @@ def test_deltaE_76_symmetric():
     assert fstp.deltaE_76(a, b) == pytest.approx(fstp.deltaE_76(b, a))
 
 
-# ---------- derive_phases ----------
+# ---------- derive_phases (Path B: HFP-driven, all layers recorded) ----------
 
 def test_derive_phases_minimum_filaments():
     with pytest.raises(ValueError, match="at least one"):
-        fstp.derive_phases([], 0.04)
+        fstp.derive_phases([], 0.04, max_thicknesses_mm=[])
 
 
 def test_derive_phases_rejects_bad_layer_height():
     fil = fstp.Filament("#FF0000", 1.7)
     with pytest.raises(ValueError, match="layer_height"):
-        fstp.derive_phases([fil], 0.0)
+        fstp.derive_phases([fil], 0.0, max_thicknesses_mm=[0.16])
     with pytest.raises(ValueError, match="layer_height"):
-        fstp.derive_phases([fil], -0.04)
+        fstp.derive_phases([fil], -0.04, max_thicknesses_mm=[0.16])
 
 
-def test_derive_phases_horses_sepia_in_range():
-    """Horses sepia stack: bottom black + dark-brown flesh + bone white.
-    Should produce a small but non-zero number of phases (not the
-    340-layer disaster of pure-99%-opacity math, not zero either)."""
+def test_derive_phases_requires_max_thicknesses_mm():
+    """Path B: max_thicknesses_mm is required (no physics-only fallback)."""
+    fil = fstp.Filament("#FF0000", 1.7)
+    with pytest.raises(ValueError, match="max_thicknesses_mm"):
+        fstp.derive_phases([fil], 0.04, max_thicknesses_mm=None)
+
+
+def test_derive_phases_horses_sepia_exactly_17():
+    """Horses sepia with HFP-derived max_thicknesses: EXACTLY 17 phases
+    (5 flesh layers @ 0.20mm + 12 bone-white layers @ 0.48mm). Colors
+    match HF's per-layer Beer-Lambert predictions."""
     filaments = [
         fstp.Filament("#000000", 0.3),
         fstp.Filament("#4E3524", 1.7),
         fstp.Filament("#E5DCC8", 4.8),
     ]
-    phases = fstp.derive_phases(filaments, layer_height_mm=0.04)
-    assert 1 <= len(phases) <= 30, (
-        f"horses sepia phase count out of plausible range: {len(phases)}"
+    # Per HFP slider_values reversed to print order: [0.16, 0.36, 0.84] →
+    # Z-deltas [0.16, 0.20, 0.48]. Bottom filament max = 0.16mm (skipped
+    # as canvas anyway).
+    max_thicknesses = [0.16, 0.20, 0.48]
+    phases = fstp.derive_phases(
+        filaments, layer_height_mm=0.04,
+        max_thicknesses_mm=max_thicknesses,
     )
-    # Bottom filament should be skipped (canvas_init handles it).
-    assert all(p.filament_idx >= 1 for p in phases)
+    assert len(phases) == 17, (
+        f"expected 17 phases (5 flesh + 12 bone white); got {len(phases)}"
+    )
+    # First 5 phases are flesh (filament_idx=1); next 12 are bone white (=2).
+    flesh_phases = [p for p in phases if p.filament_idx == 1]
+    bone_phases = [p for p in phases if p.filament_idx == 2]
+    assert len(flesh_phases) == 5
+    assert len(bone_phases) == 12
+    # Intra-filament layer numbers count 1..N per filament.
+    assert [p.intra_filament_layer for p in flesh_phases] == [1, 2, 3, 4, 5]
+    assert [p.intra_filament_layer for p in bone_phases] == list(range(1, 13))
 
 
-def test_derive_phases_include_no_op_grows_count():
-    """With include_no_op_layers=True, every layer (including the bottom
-    filament's saturated layers) gets recorded — strictly more phases."""
+def test_derive_phases_records_every_layer_no_jnd_skip():
+    """Under Path B, every iterated layer becomes a phase (no JND-skip).
+    Verify phase count equals sum of layers across non-bottom filaments."""
     filaments = [
         fstp.Filament("#000000", 0.3),
-        fstp.Filament("#4E3524", 1.7),
-        fstp.Filament("#E5DCC8", 4.8),
+        fstp.Filament("#FF0000", 1.7),
+        fstp.Filament("#0000FF", 1.7),
     ]
-    skip = fstp.derive_phases(filaments, 0.04, include_no_op_layers=False)
-    no_skip = fstp.derive_phases(filaments, 0.04, include_no_op_layers=True)
-    assert len(no_skip) > len(skip)
+    # 3 layers red + 5 layers blue = 8 phases regardless of ΔE.
+    max_thicknesses = [0.04, 0.12, 0.20]
+    phases = fstp.derive_phases(
+        filaments, 0.04, max_thicknesses_mm=max_thicknesses,
+    )
+    assert len(phases) == 3 + 5
 
 
 def test_derive_phases_single_filament_yields_zero():
     """Single bottom filament → no phases (the bottom is canvas, skipped)."""
     fil = fstp.Filament("#FF0000", 1.7)
-    phases = fstp.derive_phases([fil], 0.04)
+    phases = fstp.derive_phases([fil], 0.04, max_thicknesses_mm=[0.20])
     assert phases == []
 
 
@@ -159,10 +182,42 @@ def test_derive_phases_records_have_increasing_phase_index():
         fstp.Filament("#FF0000", 1.7),
         fstp.Filament("#0000FF", 1.7),
     ]
-    phases = fstp.derive_phases(filaments, 0.04)
+    phases = fstp.derive_phases(
+        filaments, 0.04, max_thicknesses_mm=[0.04, 0.12, 0.20],
+    )
     indices = [p.phase for p in phases]
     assert indices == sorted(indices)
     assert indices == list(range(1, len(phases) + 1))
+
+
+def test_derive_phases_inter_filament_transition_uses_actual_top():
+    """Bone white's `under_rgb` (starting under-color for its iteration)
+    should equal flesh's ACTUAL last-layer color (top of flesh stack),
+    not the last recorded phase's color. Under Path B those are the
+    same since every layer is recorded — verify it explicitly."""
+    filaments = [
+        fstp.Filament("#000000", 0.3),
+        fstp.Filament("#4E3524", 1.7),
+        fstp.Filament("#E5DCC8", 4.8),
+    ]
+    phases = fstp.derive_phases(
+        filaments, 0.04, max_thicknesses_mm=[0.16, 0.20, 0.48],
+    )
+    # Flesh's last (5th) recorded phase color:
+    flesh_top = [p for p in phases if p.filament_idx == 1][-1].rgb
+    # Bone white's 1st recorded phase color:
+    bone_first = [p for p in phases if p.filament_idx == 2][0].rgb
+    # Recompute bone_first directly using flesh_top as under_rgb:
+    thickness = 0.04
+    opacity = fstp.layer_opacity(thickness, 4.8)
+    expected = fstp.beer_lambert_blend(
+        (229, 220, 200), opacity, flesh_top,
+    )
+    # Should match to floating-point precision (~1e-6 per channel).
+    for a, b in zip(bone_first, expected):
+        assert abs(a - b) < 1e-6, (
+            f"bone_first {bone_first} != expected {expected} (using flesh top {flesh_top})"
+        )
 
 
 # ---------- HFP convenience reader ----------
