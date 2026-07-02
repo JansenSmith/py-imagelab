@@ -43,6 +43,26 @@ def corrupt_png():
 
 
 @pytest.fixture
+def horses_sepia_hfp():
+    """Synthetic minimal HFP for horses sepia — contains only the four fields
+    F7's `_load_filaments_from_hfp` reads (layer_height, filament_set,
+    slider_values). No embedded image (real HFPs are ~30MB dominated by
+    base64 image data); no copyright weight. Slider values match the artist's
+    horses sepia HFP as of 2026-07-02.
+
+    Filaments (top→bottom in HFP JSON convention):
+      Bone White (TD 4.8), Flesh (TD 1.7), Black (TD 0.3)
+    slider_values (top→bottom): [0.84, 0.36, 0.16]
+    → Per-filament max thickness (print order, bottom→top):
+      Black canvas: 0.16mm (skipped by derive_phases)
+      Flesh: 0.20mm = 5 layers @ 0.04mm
+      Bone White: 0.48mm = 12 layers @ 0.04mm
+    → Total derived phases for this stack: exactly 17.
+    """
+    return _fixture_path("horses_sepia.hfp")
+
+
+@pytest.fixture
 def baseline_hash():
     """The expected SHA256 of the canonical baseline imagemutate run output.
 

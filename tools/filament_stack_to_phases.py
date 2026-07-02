@@ -618,30 +618,45 @@ def run():
     parser = get_arg_parser()
     args = parser.parse_args()
 
+    # Path B (2026-07-02): F7 requires --hfp for HueForge-aligned output.
+    # See tools/CITATIONS.md and art/imagelab-rendering-bugs.md#bug-4.
+    if not args.hfp:
+        print(
+            "error: F7 requires --hfp for HueForge-aligned output.\n"
+            "       Provide a HueForge .hfp file; F7 reads slider_values to\n"
+            "       iterate each filament to the exact thickness HF assigned,\n"
+            "       producing a per-layer palette that matches HF's Beer-Lambert\n"
+            "       prediction. Non-HFP invocation is not currently supported.\n"
+            "       See tools/CITATIONS.md and art/imagelab-rendering-bugs.md#bug-4.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     args._hfp_max_thicknesses = None
-    if args.hfp:
-        try:
-            hfp_layer_h, hfp_filaments, hfp_max_thicknesses = (
-                _load_filaments_from_hfp(args.hfp)
-            )
-        except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
-            print(f"error: failed to read --hfp {args.hfp!r}: {exc}",
-                  file=sys.stderr)
-            sys.exit(1)
-        args._hfp_max_thicknesses = hfp_max_thicknesses
-        if args.layer_height is None:
-            args.layer_height = hfp_layer_h
-        if not args.filaments:
-            args.filaments = hfp_filaments
+    try:
+        hfp_layer_h, hfp_filaments, hfp_max_thicknesses = (
+            _load_filaments_from_hfp(args.hfp)
+        )
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        print(f"error: failed to read --hfp {args.hfp!r}: {exc}",
+              file=sys.stderr)
+        sys.exit(1)
+    args._hfp_max_thicknesses = hfp_max_thicknesses
+
+    if hfp_max_thicknesses is None:
+        print(
+            f"error: --hfp {args.hfp!r} is missing 'slider_values' or has "
+            f"fewer entries than filaments. Path B requires HF's slider "
+            f"values to determine per-filament layer counts.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if args.layer_height is None:
-        print("error: --layer-height is required (or supply --hfp)",
-              file=sys.stderr)
-        sys.exit(1)
+        args.layer_height = hfp_layer_h
     if not args.filaments:
-        print("error: at least one --filament is required (or supply --hfp)",
-              file=sys.stderr)
-        sys.exit(1)
+        args.filaments = hfp_filaments
+
     if not os.path.exists(args.target):
         print(f"error: --target {args.target!r} does not exist",
               file=sys.stderr)

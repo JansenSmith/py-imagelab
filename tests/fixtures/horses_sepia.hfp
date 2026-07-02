@@ -1,0 +1,9 @@
+{
+  "layer_height": 0.04,
+  "filament_set": [
+    {"Brand": "eSUN", "Name": "Bone White", "Color": "#E5DCC8", "Transmissivity": 4.8},
+    {"Brand": "Paramount3D", "Name": "Flesh", "Color": "#4E3524", "Transmissivity": 1.7},
+    {"Brand": "Sunlu", "Name": "Black", "Color": "#000000", "Transmissivity": 0.3}
+  ],
+  "slider_values": [0.84, 0.36, 0.16]
+}

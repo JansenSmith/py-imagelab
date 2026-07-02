@@ -288,15 +288,14 @@ def fstp_cmd():
     return [sys.executable, str(TOOLS_DIR / "filament_stack_to_phases.py")]
 
 
-def test_cli_horses_sepia_generates_outputs(fstp_cmd, target_64x64, tmp_path):
+def test_cli_horses_sepia_generates_outputs(
+    fstp_cmd, target_64x64, horses_sepia_hfp, tmp_path,
+):
     out_dir = tmp_path / "out"
     result = subprocess.run(
         fstp_cmd + [
             "--target", str(target_64x64),
-            "--layer-height", "0.04",
-            "--filament", "000000:0.3",
-            "--filament", "4E3524:1.7",
-            "--filament", "E5DCC8:4.8",
+            "--hfp", str(horses_sepia_hfp),
             "--out-dir", str(out_dir),
         ],
         capture_output=True, text=True, timeout=30,
@@ -321,7 +320,8 @@ def test_cli_horses_sepia_generates_outputs(fstp_cmd, target_64x64, tmp_path):
     assert doc["layer_height_mm"] == pytest.approx(0.04)
     assert doc["deltae_formula"] == "CIE-1976"
     assert len(doc["filaments"]) == 3
-    assert len(doc["phases"]) >= 1
+    # Path B: exactly 17 phases for horses sepia (5 flesh + 12 bone white).
+    assert len(doc["phases"]) == 17
     # Without --nozzle-mm, no radius_schedule block.
     assert "radius_schedule" not in doc
     # Brush PNG count matches phase count.
@@ -342,7 +342,9 @@ def test_cli_horses_sepia_generates_outputs(fstp_cmd, target_64x64, tmp_path):
     assert px == (0, 0, 0)
 
 
-def test_cli_missing_layer_height_errors(fstp_cmd, target_64x64, tmp_path):
+def test_cli_no_hfp_errors_clearly(fstp_cmd, target_64x64, tmp_path):
+    """Path B: F7 requires --hfp. Error message references HFP requirement
+    and points at CITATIONS / imagelab-rendering-bugs docs."""
     result = subprocess.run(
         fstp_cmd + [
             "--target", str(target_64x64),
@@ -353,42 +355,39 @@ def test_cli_missing_layer_height_errors(fstp_cmd, target_64x64, tmp_path):
         capture_output=True, text=True, timeout=10,
     )
     assert result.returncode != 0
-    assert "--layer-height" in result.stderr
+    assert "--hfp" in result.stderr
+    assert "HueForge" in result.stderr
 
 
-def test_cli_missing_filaments_errors(fstp_cmd, target_64x64, tmp_path):
+def test_cli_hfp_without_slider_values_errors(fstp_cmd, target_64x64, tmp_path):
+    """An HFP that lacks slider_values fails cleanly (Path B needs them)."""
+    hfp = tmp_path / "no_sliders.hfp"
+    hfp.write_text(json.dumps({
+        "layer_height": 0.04,
+        "filament_set": [
+            {"Color": "#E5DCC8", "Transmissivity": 4.8},
+            {"Color": "#4E3524", "Transmissivity": 1.7},
+            {"Color": "#000000", "Transmissivity": 0.3},
+        ],
+        # No slider_values key!
+    }))
     result = subprocess.run(
         fstp_cmd + [
             "--target", str(target_64x64),
-            "--layer-height", "0.04",
+            "--hfp", str(hfp),
             "--out-dir", str(tmp_path / "out"),
         ],
         capture_output=True, text=True, timeout=10,
     )
     assert result.returncode != 0
-    assert "--filament" in result.stderr
+    assert "slider_values" in result.stderr
 
 
-def test_cli_bad_filament_format_errors(fstp_cmd, target_64x64, tmp_path):
-    result = subprocess.run(
-        fstp_cmd + [
-            "--target", str(target_64x64),
-            "--layer-height", "0.04",
-            "--filament", "not-a-hex:1.7",
-            "--out-dir", str(tmp_path / "out"),
-        ],
-        capture_output=True, text=True, timeout=10,
-    )
-    assert result.returncode != 0
-
-
-def test_cli_missing_target_errors(fstp_cmd, tmp_path):
+def test_cli_missing_target_errors(fstp_cmd, horses_sepia_hfp, tmp_path):
     result = subprocess.run(
         fstp_cmd + [
             "--target", str(tmp_path / "nope.png"),
-            "--layer-height", "0.04",
-            "--filament", "000000:0.3",
-            "--filament", "4E3524:1.7",
+            "--hfp", str(horses_sepia_hfp),
             "--out-dir", str(tmp_path / "out"),
         ],
         capture_output=True, text=True, timeout=10,
@@ -397,32 +396,30 @@ def test_cli_missing_target_errors(fstp_cmd, tmp_path):
     assert "target" in result.stderr.lower()
 
 
-def test_cli_hfp_pre_fills_filaments(fstp_cmd, target_64x64, tmp_path):
-    """--hfp should pre-fill layer_height + filaments without needing
-    explicit flags."""
-    hfp = tmp_path / "fake.hfp"
-    hfp.write_text(json.dumps({
-        "layer_height": 0.04,
-        "filament_set": [
-            {"Color": "#E5DCC8", "Transmissivity": 4.8},
-            {"Color": "#4E3524", "Transmissivity": 1.7},
-            {"Color": "#000000", "Transmissivity": 0.3},
-        ]
-    }))
+def test_cli_hfp_pre_fills_filaments(
+    fstp_cmd, target_64x64, horses_sepia_hfp, tmp_path,
+):
+    """--hfp should pre-fill layer_height + filaments + slider values
+    from the HFP file; no manual --filament flags required."""
     out_dir = tmp_path / "out"
     result = subprocess.run(
         fstp_cmd + [
             "--target", str(target_64x64),
-            "--hfp", str(hfp),
+            "--hfp", str(horses_sepia_hfp),
             "--out-dir", str(out_dir),
         ],
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
     assert (out_dir / "phases.json").is_file()
+    doc = json.loads((out_dir / "phases.json").read_text())
+    # Path B: exactly 17 phases for horses.
+    assert len(doc["phases"]) == 17
 
 
-def test_cli_phase_run_sh_has_valid_invocation(fstp_cmd, target_64x64, tmp_path):
+def test_cli_phase_run_sh_has_valid_invocation(
+    fstp_cmd, target_64x64, horses_sepia_hfp, tmp_path,
+):
     """phase_run.sh should contain a syntactically-valid imagephase
     invocation. We don't actually run imagephase here (would need the
     full display stack); we grep for required flags."""
@@ -430,10 +427,7 @@ def test_cli_phase_run_sh_has_valid_invocation(fstp_cmd, target_64x64, tmp_path)
     result = subprocess.run(
         fstp_cmd + [
             "--target", str(target_64x64),
-            "--layer-height", "0.04",
-            "--filament", "000000:0.3",
-            "--filament", "4E3524:1.7",
-            "--filament", "E5DCC8:4.8",
+            "--hfp", str(horses_sepia_hfp),
             "--out-dir", str(out_dir),
         ],
         capture_output=True, text=True, timeout=30,
@@ -556,7 +550,7 @@ class TestPixelsPerMmWarning:
 
 
 def test_cli_radius_schedule_active_when_nozzle_supplied(
-    fstp_cmd, target_64x64, tmp_path
+    fstp_cmd, target_64x64, horses_sepia_hfp, tmp_path
 ):
     """--nozzle-mm activates F8: phases.json has radius_schedule block,
     phase_run.sh emits --phase-max-radius / --phase-min-radius."""
@@ -564,10 +558,7 @@ def test_cli_radius_schedule_active_when_nozzle_supplied(
     result = subprocess.run(
         fstp_cmd + [
             "--target", str(target_64x64),
-            "--layer-height", "0.04",
-            "--filament", "000000:0.3",
-            "--filament", "4E3524:1.7",
-            "--filament", "E5DCC8:4.8",
+            "--hfp", str(horses_sepia_hfp),
             "--out-dir", str(out_dir),
             "--nozzle-mm", "0.4",
             "--print-max-dim-mm", "100",  # 64px / 100mm = 0.64 px/mm — will warn
@@ -594,7 +585,7 @@ def test_cli_radius_schedule_active_when_nozzle_supplied(
 
 
 def test_cli_no_nozzle_omits_radius_schedule(
-    fstp_cmd, target_64x64, tmp_path
+    fstp_cmd, target_64x64, horses_sepia_hfp, tmp_path
 ):
     """Without --nozzle-mm, F8 stays inactive: no radius_schedule in JSON,
     no --phase-{max,min}-radius flags in shell script (F7 behavior preserved)."""
@@ -602,10 +593,7 @@ def test_cli_no_nozzle_omits_radius_schedule(
     result = subprocess.run(
         fstp_cmd + [
             "--target", str(target_64x64),
-            "--layer-height", "0.04",
-            "--filament", "000000:0.3",
-            "--filament", "4E3524:1.7",
-            "--filament", "E5DCC8:4.8",
+            "--hfp", str(horses_sepia_hfp),
             "--out-dir", str(out_dir),
         ],
         capture_output=True, text=True, timeout=30,
