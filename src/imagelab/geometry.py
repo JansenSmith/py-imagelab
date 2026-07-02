@@ -116,9 +116,22 @@ def get_random_word(canvas, words, rotation=None, clip_rect=None,
 
 
 def get_polygon(edges=3, radius=10, pos=(0, 0), rotation=0):
+    # rotation is degrees; convert to radians for math.cos / math.sin.
+    # Schema note: pre-2026-06-30 code had the conversion inverted as
+    # `rotation * (180 / math.pi)`, which computed `rotation * ~57.3`
+    # (radians per degree) instead of `rotation * ~0.0175` (degrees to
+    # radians). The bug was visually invisible because the rotation
+    # parameter is itself random in [0, 360], so the buggy mapping
+    # produced a different-but-still-uniform distribution. Old saved
+    # `-i` JSON files were rendered under the buggy mapping and will
+    # render at a different starting angle when replayed under this
+    # fix — replay-fidelity of pre-fix saves is intentionally broken
+    # in favor of semantic correctness of the `rotation` field. If
+    # exact replay fidelity of pre-fix JSONs is needed, replay them
+    # under a checkout from before this commit.
     d_angle = 2*math.pi / edges
 
-    rad = rotation * (180/math.pi)
+    rad = rotation * (math.pi/180)
 
     ret = []
 
