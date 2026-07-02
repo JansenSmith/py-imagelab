@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
 """filament_stack_to_phases — FDM filament-painting wrapper around imagephase.
 
-Translates a filament stack (layer height + ordered hex/TD list) into the
-phase-mode inputs that `imagephase` expects:
+**Path B (2026-07-02): HFP-driven.** Reads a HueForge `.hfp` file (required)
+and produces phase-mode inputs that `imagephase` expects:
 
   • One brush PNG per derived phase (solid color = Beer-Lambert blend at
-    that print depth).
-  • An init-canvas PNG (solid bottom-filament color).
+    that print layer).
+  • An init-canvas PNG (solid bottom-filament color — assumed saturated by
+    the piece backing).
   • A shell script `phase_run.sh` invoking `imagephase` with all flags.
-  • A `phases.json` capturing schedule provenance (hex, opacity, ΔE-to-prior,
-    source filament index, intra-filament layer index).
+  • A `phases.json` capturing schedule provenance.
 
-Per-filament phase count is derived via Beer-Lambert iteration; the cascade
-stops on the FIRST of:
-  • ΔE_lab(layer_color, prev_layer_color) < deltae_threshold  (perceptual
-    convergence — "the next layer would look the same as the last")
-  • cumulative opacity for this filament > opacity_ceiling     (hard
-    fallback — saturation is asymptotic, this is the practical ceiling)
+Per-filament phase count is determined by HueForge's `slider_values` from
+the HFP file: each filament iterates from its Z-start to its Z-stop, and
+**every 0.04mm-thick layer within that range becomes one phase** whose
+color is the cumulative Beer-Lambert blend of that layer over the top
+color of the previous filament's stack.
 
-Default ΔE formula is CIE 1976 (Euclidean Lab distance). Kromacut uses the
-same formula at the same 2.3 threshold in production; see CITATIONS.md.
-ΔE 2000 was considered (more perceptually uniform) and deferred — research
-showed no clear advantage at this threshold for FDM filament hues.
+For horses sepia HFP (slider_values [0.84, 0.36, 0.16] → reversed to print
+order [0.16, 0.36, 0.84], deltas [0.16, 0.20, 0.48]mm):
+    - Black canvas: 0.16mm (skipped, canvas absorbs)
+    - Flesh:        0.20mm → 5 layers @ 0.04mm → 5 phases
+    - Bone white:   0.48mm → 12 layers → 12 phases
+    - Total: exactly 17 phases
 
-Default canvas-init color is the bottom filament's pure hex (assumed
-saturated since the print's base layers stack to ≥99% opacity in any
-realistic configuration).
+**Why HFP-required (no physics-only fallback):** empirical HF data
+(2026-07-01) disproved every physics-derivable stop criterion — HF's
+"good enough" indicator involves target-image color per pixel, not
+derivable from filament + background alone. See CITATIONS.md and
+art/imagelab-rendering-bugs.md#bug-4.
+
+ΔE formula used for the `delta_e_to_prior` provenance field is CIE 1976
+(Euclidean Lab distance), matching Kromacut. Not used for iteration
+control under Path B.
 """
 import argparse
 import json
@@ -459,41 +466,28 @@ def get_arg_parser():
         help="Target image to evolve toward (passed as imagephase's target).",
     )
     parser.add_argument(
+        '--hfp', default=None,
+        help="Required. HueForge .hfp file. Reads filament_set, "
+             "layer_height, and slider_values. Path B (2026-07-02): F7 "
+             "iterates each filament to the exact thickness HF assigned "
+             "and records EVERY layer as a phase, producing a per-layer "
+             "palette that matches HF's Beer-Lambert prediction.",
+    )
+    parser.add_argument(
         '--layer-height', type=float, default=None,
-        help="Layer height in mm (e.g. 0.04). Required unless --hfp is used.",
+        help="Layer height in mm (e.g. 0.04). Read from --hfp if omitted; "
+             "supplying this flag overrides the HFP value.",
     )
     parser.add_argument(
         '--filament', action='append', dest='filaments',
         type=_parse_filament_arg, default=[],
         help="Repeatable; one per filament in print order (bottom→top). "
-             "Format: '<hex>:<TD>'. Required unless --hfp is used.",
-    )
-    parser.add_argument(
-        '--hfp', default=None,
-        help="Optional convenience: HueForge .hfp file. Pre-fills "
-             "--layer-height + --filament from the HFP's filament_set "
-             "(reversed to print order). Does NOT use slider_values — "
-             "phase counts are always re-derived from Beer-Lambert.",
+             "Format: '<hex>:<TD>'. Read from --hfp if omitted; supplying "
+             "these flags overrides the HFP filament_set.",
     )
     parser.add_argument(
         '--out-dir', default=DEFAULT_OUT_DIR,
         help=f"Output directory (default: {DEFAULT_OUT_DIR})",
-    )
-    parser.add_argument(
-        '--deltae-threshold', type=float, default=DEFAULT_DELTAE_THRESHOLD,
-        help=f"Perceptual convergence floor in CIE 1976 ΔE units "
-             f"(default: {DEFAULT_DELTAE_THRESHOLD}, matches Kromacut JND)",
-    )
-    parser.add_argument(
-        '--opacity-ceiling', type=float, default=DEFAULT_OPACITY_CEILING,
-        help=f"Per-filament opacity ceiling at which iteration stops "
-             f"(default: {DEFAULT_OPACITY_CEILING}, matches Kromacut)",
-    )
-    parser.add_argument(
-        '--include-no-op-layers', action='store_true',
-        help="Disable auto-skip of layers whose color matches the canvas "
-             "within --deltae-threshold. Default: skip (no point painting "
-             "what's already there). Use for debugging the cascade.",
     )
     parser.add_argument(
         '--nozzle-mm', type=float, default=None,
@@ -588,19 +582,19 @@ imagephase {target_path} \\
 
 
 def emit_phases_json(out_dir, phases, layer_height, filaments,
-                      deltae_threshold, opacity_ceiling,
-                      radius_schedule=None):
+                      max_thicknesses_mm, radius_schedule=None):
     """Write phases.json with full provenance for reproducibility.
 
-    Schema v2 adds optional `radius_schedule` block when F8 derivation
-    is active. Absent → v1-equivalent payload.
+    Schema v2:
+      - `radius_schedule` block appears when F8 derivation is active.
+      - `max_thicknesses_mm` block records the HFP-derived per-filament
+        thickness cap that governed iteration (Path B).
     """
     doc = {
         'version': 2,
         'layer_height_mm': layer_height,
-        'deltae_threshold': deltae_threshold,
         'deltae_formula': 'CIE-1976',
-        'opacity_ceiling': opacity_ceiling,
+        'max_thicknesses_mm': list(max_thicknesses_mm),
         'filaments': [
             {'idx': i, 'hex': f.hex, 'td': f.td, 'name': f.name}
             for i, f in enumerate(filaments)
@@ -674,10 +668,10 @@ def run():
 
     if not phases:
         print(
-            "warning: derived 0 phases. The filament stack produced no "
-            "perceptually-distinct layers above the bottom filament. "
-            "Check that filaments differ from each other and from "
-            "the bottom by at least --deltae-threshold.",
+            "warning: derived 0 phases. Under Path B (HFP-driven), this "
+            "means the HFP had only a bottom filament with no non-canvas "
+            "layers, or per-filament max thicknesses are all zero. "
+            "Check --hfp file's filament_set and slider_values.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -736,7 +730,7 @@ def run():
     # Write phases.json + phase_run.sh.
     phases_json = emit_phases_json(
         out_dir, phases, args.layer_height, args.filaments,
-        args.deltae_threshold, args.opacity_ceiling,
+        args._hfp_max_thicknesses,
         radius_schedule=radius_schedule_doc,
     )
     sh = emit_phase_run_sh(
@@ -748,7 +742,8 @@ def run():
     print(
         f"filament_stack_to_phases: {len(phases)} phases derived from "
         f"{len(args.filaments)} filaments at layer_height={args.layer_height}mm "
-        f"(ΔE threshold={args.deltae_threshold}, opacity ceiling={args.opacity_ceiling})",
+        f"(HFP-driven, max thicknesses per filament: "
+        f"{[round(t, 3) for t in args._hfp_max_thicknesses]}mm)",
         file=sys.stderr,
     )
     for i, p in enumerate(phases):

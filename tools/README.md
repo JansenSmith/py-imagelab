@@ -4,31 +4,25 @@ Sibling tooling for `py-imagelab`. Each script here is a thin layer on top of on
 
 ## filament_stack_to_phases
 
-FDM filament-painting wrapper around `imagephase`. Takes a filament stack (layer height + ordered list of `<hex>:<TD>`) and produces:
+FDM filament-painting wrapper around `imagephase`. Reads a HueForge `.hfp` file (required) and produces a per-layer palette that matches HF's per-layer Beer-Lambert prediction:
 
-- One brush PNG per derived phase (Beer-Lambert blend color at that depth).
-- An init-canvas PNG matching the target image dimensions, painted in the bottom filament's pure hex (assumed saturated).
+- One brush PNG per derived phase (each phase = one printed layer's blended color).
+- An init-canvas PNG matching the target image dimensions, painted in the bottom filament's pure hex (assumed saturated by the piece's backing).
 - `phase_run.sh` — invokes `imagephase` with all flags wired.
-- `phases.json` — full provenance (per-phase hex, opacity, ΔE-to-prior, source filament index, intra-filament layer index, plus the input filament list and threshold values).
+- `phases.json` — full provenance (per-phase hex, opacity, ΔE-to-prior, source filament index, intra-filament layer index, HFP-derived per-filament max thicknesses).
 
 ```bash
 python tools/filament_stack_to_phases.py \
   --target inputs/horses.png \
-  --layer-height 0.04 \
-  --filament 000000:0.3 \
-  --filament 4E3524:1.7 \
-  --filament E5DCC8:4.8 \
+  --hfp /path/to/horses.hfp \
   --out-dir ./horses_phases/
 # then:
 bash horses_phases/phase_run.sh
-```
 
-Or run everything in one shot:
-
-```bash
+# or run everything in one shot:
 python tools/filament_stack_to_phases.py \
   --target inputs/horses.png \
-  --hfp /path/to/piece.hfp \
+  --hfp /path/to/horses.hfp \
   --out-dir ./horses_phases/ \
   --run
 ```
@@ -38,41 +32,44 @@ python tools/filament_stack_to_phases.py \
 | Flag | Default | Meaning |
 |---|---|---|
 | `--target <path>` | required | Image to evolve against (passed to `imagephase` as the target). |
-| `--layer-height <mm>` | required (or `--hfp`) | Per-layer height in mm (e.g., `0.04`). |
-| `--filament <hex>:<TD>` (repeatable) | required (or `--hfp`) | Print order, bottom → top. Hex format `RRGGBB` or `#RRGGBB`. |
-| `--hfp <path>` | optional | Convenience: parse a HueForge `.hfp` JSON to pre-fill `--layer-height` and `--filament`. Reverses `filament_set` to print order. Does NOT use `slider_values` — phase counts are always re-derived from Beer-Lambert here. |
+| `--hfp <path>` | required | HueForge `.hfp` file. F7 reads `filament_set`, `layer_height`, and `slider_values`. **Non-HFP invocation is not currently supported** — F7 errors out with a clear message. |
+| `--layer-height <mm>` | (from HFP) | Overrides the HFP `layer_height` if supplied. |
+| `--filament <hex>:<TD>` (repeatable) | (from HFP) | Overrides the HFP `filament_set` if supplied. |
 | `--out-dir <path>` | `./phases_out/` | Where to write brushes, init_canvas, phase_run.sh, phases.json. |
-| `--deltae-threshold <float>` | `2.3` | CIE 1976 ΔE Just-Noticeable-Difference (JND). Layers within this of the previous recorded phase don't get their own phase. |
-| `--opacity-ceiling <float>` | `0.85` | Per-filament opacity at which iteration stops (asymptotic saturation). |
-| `--include-no-op-layers` | OFF | Disable both the JND-skip and the convergence-stop. Yields the maximum possible phase count for the stack. Use for debugging the cascade or for very expressive renders. |
-| `--nozzle-mm <float>` | OFF | When supplied, activates the nozzle-derived radius schedule (F8). Generates per-phase `--phase-max-radius` + `--phase-min-radius` flags in `phase_run.sh` sized so the smallest top-phase features stay above the printer's minimum reliable tower diameter. Without this flag, no radius schedule is emitted and `imagephase`'s defaults apply. |
-| `--print-max-dim-mm <float>` | `242.0` | Physical max dimension of the printed piece in mm (longest side, orientation-independent). Default is the artist's most common max-dim — override per piece. |
-| `--tower-safety-factor <float>` | `3.0` | Multiplier on `--nozzle-mm` yielding the topmost-phase minimum reliable tower diameter. Default calibrated for Bambu X1C + 0.4mm nozzle at filament-painting conditions (see `CITATIONS.md`). |
-| `--run` | OFF | After generation, invoke `bash phase_run.sh` automatically. Without this, the script just generates and exits — the artist runs the shell script when ready. |
+| `--nozzle-mm <float>` | OFF | When supplied, activates the nozzle-derived radius schedule (F8). Generates per-phase `--phase-max-radius` + `--phase-min-radius` flags in `phase_run.sh`. |
+| `--print-max-dim-mm <float>` | `242.0` | Physical max dimension of the printed piece in mm (longest side, orientation-independent). Default is the artist's most common max-dim. |
+| `--tower-safety-factor <float>` | `3.0` | Multiplier on `--nozzle-mm` yielding the topmost-phase minimum reliable tower diameter. See `CITATIONS.md`. |
+| `--run` | OFF | After generation, invoke `bash phase_run.sh` automatically. |
 
-### How phases get derived
+### How phases get derived (Path B — HFP-driven, 2026-07-02)
 
-Phase derivation walks the filament stack bottom-up:
+Phase derivation reads HF's `slider_values` from the HFP file and iterates each filament to that exact thickness. **Every iterated layer becomes one phase.** No JND-skip; no opacity-ceiling; no per-layer convergence check.
 
-1. Start with the bottom filament's pure color as `canvas`.
-2. For each filament above the bottom: iterate layer-by-layer applying Beer-Lambert (`T = 10^(-thickness/TD)`, `opacity = 1 - T`, `C_out = C_filament * opacity + C_under * T`).
-3. Record a phase whenever the new layer's color is ≥ `deltae_threshold` ΔE from the last recorded color (perceptually distinguishable from the prior phase).
-4. Stop iterating this filament when ANY of:
-   - The layer's color is within `deltae_threshold` of the previous layer's color (perceptual convergence — adding more thickness won't change appearance).
-   - Cumulative opacity reaches `opacity_ceiling` (asymptotic saturation).
-5. Move to the next filament, building on the LAST recorded phase color.
+For horses sepia (HFP slider_values [0.84, 0.36, 0.16] → reversed to print order [0.16, 0.36, 0.84]):
 
-### ΔE choice — what got picked and why
+1. Start with the bottom filament's pure color as `canvas` (the piece backing is assumed to fully saturate the bottom color).
+2. Black canvas: max_thickness = 0.16mm (skipped; canvas absorbs it).
+3. Flesh: max_thickness = 0.36 - 0.16 = 0.20mm → **5 layers @ 0.04mm.** Each layer's color computed via cumulative Beer-Lambert (`T = 10^(-thickness/TD)`, `opacity = 1 - T`, `C_out = C_filament * opacity + C_under * T`) with `under_rgb = black canvas`. All 5 layer colors recorded.
+4. Bone White: max_thickness = 0.84 - 0.36 = 0.48mm → **12 layers.** `under_rgb = actual top color of flesh stack` (not last recorded phase — Path B fixes this to use the true top-of-stack color). All 12 layer colors recorded.
+5. Total: **exactly 17 phases** (5 + 12), colors matching HF's per-layer prediction.
 
-Default: **CIE 1976** (Euclidean Lab distance). This matches Kromacut's `deltaELab` (see `CITATIONS.md`) at the same `2.3` "just noticeable difference" threshold. Kromacut is the closest open-source comparator we have; matching their algorithm + threshold means filament-painting choices map directly between the two tools.
+### Why HFP is required (background)
 
-CIE 2000 (`ciede2000`) is more perceptually uniform but adds ~50 LoC of arithmetic for unclear benefit at this threshold. Deferred to a future PR if a use case surfaces — likely a stack with highly saturated complementary colors where 1976's hue non-uniformity matters.
+The 2026-07-01 empirical investigation into HF's "good enough" indicator (`art/imagelab-rendering-bugs.md#bug-4`) showed that HF's per-filament stop criterion involves target-image color per pixel — not derivable from physics alone. Attempting to reverse-engineer with a fixed opacity ceiling (or per-layer ΔE threshold) worked for some cases and failed for others.
+
+Since HF has already computed the correct per-filament layer counts for a given target image and written them to the HFP file, the pragmatic answer is: **use HF's own answer**. F7 reads `slider_values` directly. Perfect HF match with no algorithm reinvention.
+
+Non-HFP fallback deferred as an improvement; typical filament-painting workflow uses HFP so this doesn't affect real usage. See `CITATIONS.md` for the empirical data and reasoning.
+
+### ΔE choice — CIE 1976 (matches Kromacut)
+
+Default: **CIE 1976** (Euclidean Lab distance). This matches Kromacut's `deltaELab` (see `CITATIONS.md`). Used only for the `delta_e_to_prior` field in `phases.json` provenance; not consumed for iteration control (Path B uses HFP thicknesses directly).
 
 ### Limitations + caveats
 
 - **Beer-Lambert in sRGB.** Math is applied directly in sRGB rather than linear RGB — matches HueForge's and Kromacut's convention. Slightly less physically accurate than linear-space blending, but the calibration of filament colors + TDs is end-to-end sRGB, so the round-trip works out.
-- **Bottom filament is assumed saturated.** The print's base layers stack to ~100% opacity, so this is safe for any realistic filament-painting configuration. If you want to record bottom-filament layers explicitly, use `--include-no-op-layers`.
-- **Per-piece HFP slider schedules are ignored.** Even with `--hfp`, the artist's `slider_values` choice is intentionally not used — F7's contract is "derive from physics, not from the artist's HF choices." For piece-specific schedule overrides, edit `phase_run.sh` directly.
+- **Bottom filament is assumed saturated.** The print's base layers stack to ~100% opacity via the piece backing, so this is safe for the artist's typical piece structure. If your piece has no backing and the bottom filament is thin, the visible bottom color may be lighter than F7 assumes.
+- **HFP-required.** Non-HFP invocation errors out; there is no physics-only fallback in the current implementation.
 - **Radius schedule only active with `--nozzle-mm`.** Without that flag, the generated `phase_run.sh` omits `--phase-max-radius` / `--phase-min-radius` and `imagephase`'s defaults apply (which may produce features smaller than the printer can resolve). Always supply `--nozzle-mm` for FDM use.
 
 ### Radius schedule (F8 — nozzle-derived)
@@ -105,13 +102,20 @@ If `pixels_per_mm` lands outside the 2.0–5.0 sweet spot (recommended ~3 px/mm)
 
 **Tower-safety-factor 3.0 is research-derived**, not empirical for this exact rig. Per CITATIONS.md, three independent strands (HueForge slicer floor, Kromacut default, structural pin minimum guides) converge on 1.0–1.2mm minimum tower diameter for a 0.4mm nozzle, with 1.2mm (factor 3.0) at the upper-safe end of consumer/community consensus. If a future calibration print on the exact Bambu X1C + filament-painting rig produces a refined value, update the default + the citation.
 
-### Sample output (horses sepia)
+### Sample output (horses sepia — Path B)
+
+Running against the horses sepia HFP produces exactly 17 phases: 5 flesh layers on the black canvas, then 12 bone-white layers on top of the flesh stack. Colors trace HF's per-layer Beer-Lambert prediction end-to-end.
 
 ```
-filament_stack_to_phases: 3 phases derived from 3 filaments at layer_height=0.04mm
-  phase  1: #080504  (filament 2 4E3524, layer 2, opacity=0.103, ΔE-to-prior=2.53, radius 2-90px)
-  phase  2: #0C0805  (filament 2 4E3524, layer 3, opacity=0.150, ΔE-to-prior=2.53, radius 2-54px)
-  phase  3: #14100D  (filament 3 E5DCC8, layer 2, opacity=0.038, ΔE-to-prior=2.80, radius 2-19px)
+filament_stack_to_phases: 17 phases derived from 3 filaments at layer_height=0.04mm
+  (HFP-driven, max thicknesses per filament: [0.16, 0.2, 0.48]mm)
+  phase  1: #040302  (filament 2 4E3524, layer 1, opacity=0.053, ...)
+  phase  2: #080504  (filament 2 4E3524, layer 2, opacity=0.103, ...)
+  ...
+  phase  5: #100B08  (filament 2 4E3524, layer 5, opacity=0.237, ...)
+  phase  6: #171310  (filament 3 E5DCC8, layer 1, opacity=0.019, ...)
+  ...
+  phase 17: #4F4844  (filament 3 E5DCC8, layer 12, opacity=0.206, ...)
 ```
 
-3 phases on a sepia stack (black / dark-brown / off-white) — perceptually similar colors converge quickly. For a stack of bright primaries, expect 6-15 phases. Radius columns appear when `--nozzle-mm` is supplied (above run used `--nozzle-mm 0.4 --print-max-dim-mm 242 --tower-safety-factor 3.0`).
+Radius columns appear when `--nozzle-mm` is supplied.

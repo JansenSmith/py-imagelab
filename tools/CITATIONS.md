@@ -43,13 +43,55 @@ Bibliography for `tools/` calibration defaults. Future maintainers extend this r
 
   Future work: if a colorful filament stack (e.g., bright red + bright green) shows phase-count anomalies vs HueForge's preview, swap to CIE 2000 via an opt-in `--deltae-formula 2000` flag.
 
-## Opacity ceiling — 0.85
+## Opacity ceiling — 0.85 (LEGACY — no longer consumed by derive_phases)
 
-**Decision:** `0.85` matches Kromacut's documented "or opacity > 0.85, whichever comes first" stop condition for layer-by-layer color blending. No other research source consulted; this is the canonical reference for the same FDM use case.
+**Original decision:** `0.85` matched Kromacut's documented "or opacity > 0.85, whichever comes first" stop condition for layer-by-layer color blending.
 
-## JND threshold — 2.3
+**Superseded 2026-07-02 by Path B (HFP-driven).** `derive_phases` no longer uses an opacity ceiling; iteration stops when the HFP-supplied per-filament thickness cap is reached. The constant is retained in the module for potential future fallback but is not currently consumed. See "Path B" section below.
 
-**Decision:** `2.3` ΔE units, matches Kromacut. Common Just-Noticeable-Difference for CIE 1976 in image-processing literature is in the 1.0–2.5 range depending on viewing conditions; Kromacut's 2.3 sits at the upper end (forgiving — fewer false-distinct calls) and works in production. Adopting their choice means filament-painting decisions translate between tools.
+## JND threshold — 2.3 (LEGACY — no longer consumed by derive_phases)
+
+**Original decision:** `2.3` ΔE units, matches Kromacut. Common Just-Noticeable-Difference for CIE 1976 in image-processing literature is in the 1.0–2.5 range depending on viewing conditions; Kromacut's 2.3 sits at the upper end (forgiving — fewer false-distinct calls) and works in production. Adopting their choice means filament-painting decisions translate between tools.
+
+**Superseded 2026-07-02 by Path B.** The old per-layer ΔE convergence check (which used this threshold) was buggy — fired after ~2 layers of flesh on horses sepia, killing the palette. Path B drops it entirely and records EVERY iterated layer, giving a per-layer HF-aligned palette.
+
+## Path B — HFP-driven iteration (2026-07-02)
+
+**Decision:** `derive_phases` reads HueForge slider values from the `--hfp` file and iterates each filament to that exact thickness, recording every layer as a phase.
+
+**Why physics-only calibration doesn't work:** Empirical HF data gathered 2026-07-01 disproves both "constant opacity per filament" and "constant per-layer ΔE" hypotheses. HF's "good enough" indicator fires at radically different opacities depending on background color:
+
+| Case | Layers to HF indicator | Cumulative opacity |
+|---|---|---|
+| Wine red (TD 1.7) over saturated black | 4 | 19.5% |
+| Wine red (TD 1.7) over saturated flesh (dark sepia) | 4 | 19.5% |
+| Wine red (TD 1.7) over saturated bone white | 10 | 41.8% |
+| Natural (TD ~21) over saturated black | 53 | 20.8% |
+| Natural (TD ~21) over saturated bone white | 1 | 0.44% |
+| Bone white (TD 4.8) over saturated black | 12 | 20.6% |
+| Bone white (TD 4.8) over saturated flesh | 12 | 20.6% |
+| Flesh (TD 1.7) over saturated bone white | 11 | 44.9% |
+| Flesh (TD 1.7) over saturated black | 5 | 23.7% |
+
+Two regimes emerge: dark backgrounds cluster at ~20% opacity; bright backgrounds vary wildly (0.44% to 44.9%). HF's algorithm almost certainly involves target-image color per pixel, making it non-derivable from physics alone.
+
+**Stack-order finding:** Adding bone white BELOW flesh didn't change wine red's iteration count over flesh (still 4 layers). Confirms that only the DIRECTLY-BELOW filament's top color matters, not deeper stack. F7's model already handles this correctly (`under_rgb = last color of previous filament's stack`).
+
+**Path B mechanism:** F7 reads `slider_values` from the HFP JSON (aligned with `filament_set`, top→bottom), reverses to print order, and computes per-filament max thickness as the Z-delta from the previous filament's top. For horses sepia (slider_values [0.84, 0.36, 0.16] → reversed [0.16, 0.36, 0.84]):
+
+- Black (bottom, canvas): max thickness 0.16mm (skipped)
+- Flesh: 0.36 - 0.16 = 0.20mm → 5 layers at 0.04mm
+- Bone White: 0.84 - 0.36 = 0.48mm → 12 layers
+
+**Total phases: exactly 17** (5 flesh + 12 bone white), each colored via cumulative Beer-Lambert with the actual top-of-previous-filament as the under_rgb.
+
+**Non-HFP invocation:** No fallback engineered. F7 errors out with a clear message directing the user to provide `--hfp`. Fallback design deferred as improvement; typical artist workflow uses HFP so this doesn't affect real usage.
+
+**Sources consulted for the HF empirical data:**
+
+- Artist HF observations 2026-07-01 and 2026-07-02 on horses sepia HFP + inserted test filaments (wine red PolyLite TD 1.7; natural PolyLite TD ~21 pending measurement).
+- `art/hueforge_technical.md` (Beer-Lambert formula, TD convention).
+- Cross-verified against Kromacut source (`src/lib/nextBestColor.ts`) for ΔE formula consistency.
 
 ## Tower safety factor — 3.0 (F8)
 
