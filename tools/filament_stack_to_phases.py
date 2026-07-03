@@ -1,38 +1,49 @@
 #!/usr/bin/env python3
 """filament_stack_to_phases — FDM filament-painting wrapper around imagephase.
 
-**Path B (2026-07-02): HFP-driven.** Reads a HueForge `.hfp` file (required)
-and produces phase-mode inputs that `imagephase` expects:
+**Path B' (2026-07-02): HFP-driven, saturated-endpoint linear interpolation.**
+Reads a HueForge `.hfp` file (required) and produces phase-mode inputs
+that `imagephase` expects:
 
-  • One brush PNG per derived phase (solid color = Beer-Lambert blend at
-    that print layer).
+  • One brush PNG per derived phase (solid color = interpolation between
+    previous-filament saturated color and current-filament saturated color).
   • An init-canvas PNG (solid bottom-filament color — assumed saturated by
     the piece backing).
   • A shell script `phase_run.sh` invoking `imagephase` with all flags.
   • A `phases.json` capturing schedule provenance.
 
 Per-filament phase count is determined by HueForge's `slider_values` from
-the HFP file: each filament iterates from its Z-start to its Z-stop, and
-**every 0.04mm-thick layer within that range becomes one phase** whose
-color is the cumulative Beer-Lambert blend of that layer over the top
-color of the previous filament's stack.
+the HFP file. Each non-canvas filament produces N phases whose colors
+are LINEARLY INTERPOLATED from the previous filament's saturated color
+to the current filament's saturated color:
+
+    phase_color = (i / N) * filament_pure + (1 - i / N) * under_color
+
+At layer i = N, phase_color exactly equals filament_pure (the top of that
+filament's stack is treated as fully saturated). At layer i = 1, phase_color
+is 1/N of the way from under_color toward filament_pure.
 
 For horses sepia HFP (slider_values [0.84, 0.36, 0.16] → reversed to print
 order [0.16, 0.36, 0.84], deltas [0.16, 0.20, 0.48]mm):
     - Black canvas: 0.16mm (skipped, canvas absorbs)
-    - Flesh:        0.20mm → 5 layers @ 0.04mm → 5 phases
-    - Bone white:   0.48mm → 12 layers → 12 phases
-    - Total: exactly 17 phases
+    - Flesh:        5 phases, black → pure flesh (#4E3524)
+    - Bone white:   12 phases, pure flesh → pure bone-white (#E5DCC8)
+    - Total: exactly 17 phases spanning full tonal range
+
+**Why interpolation instead of Beer-Lambert:** strict Beer-Lambert at
+HFP-supplied thicknesses produces a palette that bottoms out at "warm
+medium-dark" (~#3E3730 for horses sepia) because 12 layers of TD-4.8
+bone-white over dark sepia is only 20.6% opaque. HF's own preview
+renders bright pixels near-pure bone-white (~#E3D7C4). Path B' trades
+Beer-Lambert accuracy for tonal-range match with HF's preview. This is
+a HEURISTIC, not physics-accurate. See tools/CITATIONS.md.
 
 **Why HFP-required (no physics-only fallback):** empirical HF data
-(2026-07-01) disproved every physics-derivable stop criterion — HF's
-"good enough" indicator involves target-image color per pixel, not
-derivable from filament + background alone. See CITATIONS.md and
-art/imagelab-rendering-bugs.md#bug-4.
+(2026-07-01) disproved every physics-derivable stop criterion. HFP's
+slider_values are treated as authoritative for layer counts.
 
-ΔE formula used for the `delta_e_to_prior` provenance field is CIE 1976
-(Euclidean Lab distance), matching Kromacut. Not used for iteration
-control under Path B.
+The `opacity` field in each phase's provenance stores the interpolation
+fraction (i / N) under Path B', NOT a raw Beer-Lambert opacity.
 """
 import argparse
 import json
@@ -190,27 +201,46 @@ def derive_phases(filaments, layer_height_mm, max_thicknesses_mm,
                   deltae_fn=deltaE_76):
     """Walk filament stack bottom-up. Return a list of DerivedPhase.
 
-    HFP-driven (Path B): each non-bottom filament iterates layer-by-layer
-    to its HFP-supplied `max_thicknesses_mm[fi]`, and EVERY iterated layer
-    is recorded as a phase. For horses sepia HFP (slider values yielding
-    max thicknesses [0.16, 0.20, 0.48] mm for [black, flesh, bone white]),
-    this produces EXACTLY 17 phases (5 flesh + 12 bone white), with colors
-    matching HF's per-layer Beer-Lambert predictions.
+    Path B' (2026-07-02): HFP-driven, saturated-endpoint linear
+    interpolation.
+
+    For each non-canvas filament, F7 iterates as many layers as HFP's
+    slider_values assigned to it and produces N phases whose colors are
+    the linear interpolation from the previous filament's TOP saturated
+    color to the current filament's pure saturated color:
+
+        phase_color = (i / N) * filament_pure + (1 - i / N) * under_color
+
+    At layer i = N, phase_color exactly equals filament_pure (the top of
+    that filament's stack is treated as fully saturated). At layer i = 1,
+    phase_color is 1/N of the way from under_color to filament_pure.
+
+    **This is a heuristic, not Beer-Lambert physics.** Strict Beer-Lambert
+    at HFP-supplied thicknesses produces a palette that bottoms out at
+    "warm medium-dark" (~#3E3730 for horses sepia) because 12 layers of
+    TD-4.8 bone-white over dark sepia is only 20.6% opaque. But HF's own
+    preview renders bright pixels near-pure bone-white (~#E3D7C4). Path B'
+    trades Beer-Lambert accuracy for tonal-range match with HF's preview,
+    treating each filament's HFP-assigned thickness as "reaches saturation
+    at the top layer."
+
+    Alternative heuristics considered but not chosen:
+      - Scaled Beer-Lambert (scale opacity so opacity_at_N = 1.0): same
+        endpoints, different curve shape. Held as a fallback if linear
+        interpolation looks poor in visual A/B.
+      - Reimplementing HF's per-pixel algorithm inside F7 (Path C):
+        significant reinvention; explicitly out of scope.
+
+    See tools/CITATIONS.md "Path B' — saturated-endpoint interpolation"
+    section and art/imagelab-rendering-bugs.md#bug-4 for context.
 
     The bottom filament is assumed pre-saturated (the print's base layers
     stack to ~100% opacity thanks to the piece's backing), so its layers
     are skipped — the canvas starts at its pure hex.
 
-    For each filament above the bottom, iterate applying Beer-Lambert
-    against a FIXED `under_rgb` (the color at the top of the previous
-    filament's stack — actual last-layer color, not last recorded phase).
-    Each iteration records a phase. Iteration stops at max_thicknesses_mm[fi].
-
-    Rationale for recording every layer (dropping the JND-skip that was
-    previously here): HF's per-pixel algorithm decides different Z-slice
-    colors per pixel, and imagephase needs the full palette to reproduce
-    that range. See art/imagelab-rendering-bugs.md#bug-4 and the empirical
-    HF data in tools/CITATIONS.md.
+    For horses sepia HFP (max thicknesses [0.16, 0.20, 0.48] mm), this
+    produces EXACTLY 17 phases: 5 flesh interpolated black→pure-flesh,
+    then 12 bone-white interpolated pure-flesh→pure-bone-white.
     """
     if len(filaments) < 1:
         raise ValueError("at least one filament required")
@@ -237,47 +267,50 @@ def derive_phases(filaments, layer_height_mm, max_thicknesses_mm,
         if fi == 0:
             continue
 
-        # under_rgb stays fixed for this filament's whole sweep — it's the
-        # actual last-layer color at the top of the previous filament's stack.
+        # under_rgb: color at the TOP of the previous filament's stack
+        # (treated as saturated pure color of the previous filament, per
+        # Path B'). Stays fixed for this filament's whole sweep.
         under_rgb = canvas_rgb
         max_thickness = float(max_thicknesses_mm[fi])
-        last_layer_rgb = under_rgb
-        intra = 0
+        n_layers = int(round(max_thickness / layer_height_mm))
 
-        while True:
-            intra += 1
+        # Safety net.
+        if n_layers <= 0:
+            continue
+        if n_layers > 1000:
+            n_layers = 1000
+
+        for intra in range(1, n_layers + 1):
             thickness = intra * layer_height_mm
-            opacity = layer_opacity(thickness, fil.td)
-            layer_rgb = beer_lambert_blend(fil.rgb, opacity, under_rgb)
-            last_layer_rgb = layer_rgb
+            fraction = intra / n_layers
 
-            # Record every iterated layer as a phase (Path B: no JND skip).
+            # Linear RGB interpolation: at intra=n_layers, phase_color
+            # equals filament_pure (saturated); at intra=1, it's 1/N of
+            # the way from under_rgb to pure.
+            layer_rgb = tuple(
+                fraction * f + (1.0 - fraction) * u
+                for f, u in zip(fil.rgb, under_rgb)
+            )
+
+            # For provenance: `opacity` field now stores the interpolation
+            # fraction (equivalent to "assumed opacity" under Path B'),
+            # NOT the raw Beer-Lambert opacity. See docstring for rationale.
             phase_counter += 1
             phases.append(DerivedPhase(
                 phase_idx=phase_counter,
                 filament_idx=fi,
                 intra_filament_layer=intra,
                 cumulative_thickness=thickness,
-                opacity=opacity,
+                opacity=fraction,
                 rgb=layer_rgb,
                 delta_e_to_prior=deltae_fn(layer_rgb, canvas_rgb),
             ))
             canvas_rgb = layer_rgb
 
-            # Stop when we've reached HFP's assigned thickness for this filament.
-            if thickness >= max_thickness - 1e-9:
-                break
-            # Safety net.
-            if intra > 1000:
-                break
-
-        # Inter-filament transition: propagate the actual top-of-stack color
-        # (last iterated layer) — see A.5 in the DCCATL plan. This is
-        # subtly different from canvas_rgb, which tracks the last recorded
-        # phase; under Path B those are the same since every layer is
-        # recorded, but leaving the explicit assignment for correctness
-        # and clarity.
-        canvas_rgb = last_layer_rgb
+        # Inter-filament transition: propagate the saturated top-of-stack
+        # color (= filament_pure under Path B'). Bone white's iteration
+        # will start with this as under_rgb.
+        canvas_rgb = tuple(float(c) for c in fil.rgb)
 
     return phases
 

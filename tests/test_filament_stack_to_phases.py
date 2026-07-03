@@ -190,11 +190,10 @@ def test_derive_phases_records_have_increasing_phase_index():
     assert indices == list(range(1, len(phases) + 1))
 
 
-def test_derive_phases_inter_filament_transition_uses_actual_top():
-    """Bone white's `under_rgb` (starting under-color for its iteration)
-    should equal flesh's ACTUAL last-layer color (top of flesh stack),
-    not the last recorded phase's color. Under Path B those are the
-    same since every layer is recorded — verify it explicitly."""
+def test_derive_phases_inter_filament_transition_uses_saturated_top():
+    """Under Path B', bone white's `under_rgb` (starting under-color) is
+    flesh's SATURATED pure color (78, 53, 36), not the Beer-Lambert last-
+    layer color. This is the saturated-endpoint interpolation contract."""
     filaments = [
         fstp.Filament("#000000", 0.3),
         fstp.Filament("#4E3524", 1.7),
@@ -203,21 +202,65 @@ def test_derive_phases_inter_filament_transition_uses_actual_top():
     phases = fstp.derive_phases(
         filaments, 0.04, max_thicknesses_mm=[0.16, 0.20, 0.48],
     )
-    # Flesh's last (5th) recorded phase color:
+    # Flesh's last (5th) recorded phase color = pure flesh under Path B'.
     flesh_top = [p for p in phases if p.filament_idx == 1][-1].rgb
-    # Bone white's 1st recorded phase color:
+    assert flesh_top == pytest.approx((78, 53, 36))
+    # Bone white's 1st recorded phase color = 1/12 of the way from
+    # pure flesh toward pure bone white.
     bone_first = [p for p in phases if p.filament_idx == 2][0].rgb
-    # Recompute bone_first directly using flesh_top as under_rgb:
-    thickness = 0.04
-    opacity = fstp.layer_opacity(thickness, 4.8)
-    expected = fstp.beer_lambert_blend(
-        (229, 220, 200), opacity, flesh_top,
+    expected = tuple(
+        (1 / 12) * b + (11 / 12) * f
+        for f, b in zip((78, 53, 36), (229, 220, 200))
     )
-    # Should match to floating-point precision (~1e-6 per channel).
     for a, b in zip(bone_first, expected):
         assert abs(a - b) < 1e-6, (
-            f"bone_first {bone_first} != expected {expected} (using flesh top {flesh_top})"
+            f"bone_first {bone_first} != expected {expected} "
+            f"(interpolating from saturated flesh (78,53,36) "
+            f"to bone white pure (229,220,200))"
         )
+
+
+def test_derive_phases_tonal_range_hits_saturated_endpoints():
+    """Path B' invariant: the LAST phase of each non-bottom filament
+    equals the filament's pure saturated RGB. Catches any regression
+    that would return to Path B's too-dark palette (peak ~#3E3730)."""
+    filaments = [
+        fstp.Filament("#000000", 0.3),
+        fstp.Filament("#4E3524", 1.7),
+        fstp.Filament("#E5DCC8", 4.8),
+    ]
+    phases = fstp.derive_phases(
+        filaments, 0.04, max_thicknesses_mm=[0.16, 0.20, 0.48],
+    )
+    # Total phase count = 5 flesh + 12 bone white.
+    assert len(phases) == 17
+
+    # LAST phase of flesh (5th) = pure flesh saturated RGB.
+    flesh_phases = [p for p in phases if p.filament_idx == 1]
+    assert flesh_phases[-1].rgb == pytest.approx((78, 53, 36)), (
+        f"last flesh phase should be pure flesh (78,53,36); "
+        f"got {flesh_phases[-1].rgb}"
+    )
+
+    # LAST phase of bone white (12th) = pure bone-white saturated RGB.
+    bone_phases = [p for p in phases if p.filament_idx == 2]
+    assert bone_phases[-1].rgb == pytest.approx((229, 220, 200)), (
+        f"last bone-white phase should be pure bone-white (229,220,200); "
+        f"got {bone_phases[-1].rgb}"
+    )
+
+    # FIRST phase of flesh = 1/5 of the way from black to pure flesh.
+    expected_first_flesh = tuple(v * 1 / 5 for v in (78, 53, 36))
+    for a, b in zip(flesh_phases[0].rgb, expected_first_flesh):
+        assert abs(a - b) < 1e-6
+
+    # FIRST phase of bone white = 1/12 of the way from pure flesh to pure bone.
+    expected_first_bone = tuple(
+        (1 / 12) * bw + (11 / 12) * fl
+        for fl, bw in zip((78, 53, 36), (229, 220, 200))
+    )
+    for a, b in zip(bone_phases[0].rgb, expected_first_bone):
+        assert abs(a - b) < 1e-6
 
 
 # ---------- HFP convenience reader ----------

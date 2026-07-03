@@ -55,6 +55,36 @@ Bibliography for `tools/` calibration defaults. Future maintainers extend this r
 
 **Superseded 2026-07-02 by Path B.** The old per-layer ΔE convergence check (which used this threshold) was buggy — fired after ~2 layers of flesh on horses sepia, killing the palette. Path B drops it entirely and records EVERY iterated layer, giving a per-layer HF-aligned palette.
 
+## Path B' — saturated-endpoint linear interpolation (2026-07-02)
+
+**Decision:** `derive_phases` interpolates each filament's phase colors linearly from the previous filament's saturated color to the current filament's saturated pure color, across the HFP-supplied layer count.
+
+```
+for layer i in 1..N:
+    fraction = i / N
+    phase_color = fraction * filament_pure + (1 - fraction) * under_color
+```
+
+At layer i = N, phase_color = filament_pure. At layer i = 1, phase_color is 1/N of the way from under toward pure.
+
+For horses sepia (17 phases from HFP): 5 flesh phases interpolate black → pure flesh; 12 bone-white phases interpolate pure flesh → pure bone-white. Palette spans `#000000` through `#4E3524` (pure flesh) to `#E5DCC8` (pure bone-white) — matching HF's preview tonal range.
+
+**Why this is a heuristic and not physics:**
+
+Strict Beer-Lambert at HFP-supplied thicknesses produces a palette that bottoms out at ~#3E3730 for horses (12 layers of TD-4.8 bone-white over dark sepia is only 20.6% opaque). HF's own preview renders bright pixels at ~#E3D7C4 (near-pure bone-white). The ~70% brightness gap means Beer-Lambert-per-HFP-layer doesn't produce the palette HF's actual per-pixel algorithm renders.
+
+We DO NOT know what HF uses internally. HF's per-pixel algorithm varies both stack HEIGHT and filament COMPOSITION per pixel — bright pixels probably get only bone-white deposited (no black or flesh underneath) and reach near-pure bone-white color; dark pixels get only black. The palette range of a HF-rendered print is the range across ALL per-pixel compositions.
+
+Rather than reimplement HF's per-pixel logic (which would be Path C — significant reinvention, artist flagged as maybe-nonsense), Path B' assumes each filament's HFP-supplied thickness "reaches saturation" at the top layer. This is a MODELING SHORTCUT that captures the desired tonal endpoints without claiming physics accuracy.
+
+**Alternative heuristics considered but NOT chosen:**
+
+- **Scaled Beer-Lambert** (compute raw opacity, then scale so opacity_at_N = 1.0). Same endpoints, different intermediate curve (exponential rather than linear). Held as a fallback if visual A/B shows linear interpolation looks poor.
+- **HF color-core screenshot sampling**: exact palette but messy (requires screenshot capture + color sampling). Deferred as `[lo/lo]` improvement if the linear heuristic proves inadequate for some future piece.
+- **Path C (reimplement HF's per-pixel algorithm)**: multi-hour reinvention; explicitly out of scope.
+
+Documented as a heuristic; not claimed as HF-internal-algorithm-accurate.
+
 ## Path B — HFP-driven iteration (2026-07-02)
 
 **Decision:** `derive_phases` reads HueForge slider values from the `--hfp` file and iterates each filament to that exact thickness, recording every layer as a phase.
