@@ -191,9 +191,10 @@ def test_derive_phases_records_have_increasing_phase_index():
 
 
 def test_derive_phases_inter_filament_transition_uses_saturated_top():
-    """Under Path B', bone white's `under_rgb` (starting under-color) is
+    """Under Path B'', bone white's `under_rgb` (starting under-color) is
     flesh's SATURATED pure color (78, 53, 36), not the Beer-Lambert last-
-    layer color. This is the saturated-endpoint interpolation contract."""
+    layer color. The scaled Beer-Lambert interpolation curve determines
+    the intermediate-layer fractions."""
     filaments = [
         fstp.Filament("#000000", 0.3),
         fstp.Filament("#4E3524", 1.7),
@@ -202,21 +203,65 @@ def test_derive_phases_inter_filament_transition_uses_saturated_top():
     phases = fstp.derive_phases(
         filaments, 0.04, max_thicknesses_mm=[0.16, 0.20, 0.48],
     )
-    # Flesh's last (5th) recorded phase color = pure flesh under Path B'.
+    # Flesh's last (5th) recorded phase color = pure flesh.
     flesh_top = [p for p in phases if p.filament_idx == 1][-1].rgb
     assert flesh_top == pytest.approx((78, 53, 36))
-    # Bone white's 1st recorded phase color = 1/12 of the way from
-    # pure flesh toward pure bone white.
+    # Bone white's 1st recorded phase color = scaled-BL fraction from
+    # pure flesh toward pure bone white. Under scaled BL:
+    #   raw_1  = 1 - 10^(-0.04/4.8) ≈ 0.0192
+    #   raw_12 = 1 - 10^(-0.48/4.8) ≈ 0.2057
+    #   fraction = raw_1 / raw_12 ≈ 0.0925
     bone_first = [p for p in phases if p.filament_idx == 2][0].rgb
+    raw_1 = fstp.layer_opacity(0.04, 4.8)
+    raw_max = fstp.layer_opacity(0.48, 4.8)
+    fraction = raw_1 / raw_max
     expected = tuple(
-        (1 / 12) * b + (11 / 12) * f
+        fraction * b + (1 - fraction) * f
         for f, b in zip((78, 53, 36), (229, 220, 200))
     )
     for a, b in zip(bone_first, expected):
         assert abs(a - b) < 1e-6, (
             f"bone_first {bone_first} != expected {expected} "
-            f"(interpolating from saturated flesh (78,53,36) "
-            f"to bone white pure (229,220,200))"
+            f"(scaled-BL fraction {fraction:.4f} from saturated flesh "
+            f"(78,53,36) to bone white pure (229,220,200))"
+        )
+
+
+def test_derive_phases_linear_mode_uses_even_fractions():
+    """When interpolation_mode='linear', fractions are equal-spaced
+    (intra / N). Verify against the horses stack + first-layer expected
+    color under linear interpolation."""
+    filaments = [
+        fstp.Filament("#000000", 0.3),
+        fstp.Filament("#4E3524", 1.7),
+        fstp.Filament("#E5DCC8", 4.8),
+    ]
+    phases = fstp.derive_phases(
+        filaments, 0.04, max_thicknesses_mm=[0.16, 0.20, 0.48],
+        interpolation_mode='linear',
+    )
+    # Same 17-phase count as scaled-bl.
+    assert len(phases) == 17
+    # Same endpoints (interpolation modes only differ in intermediate curve).
+    flesh_phases = [p for p in phases if p.filament_idx == 1]
+    bone_phases = [p for p in phases if p.filament_idx == 2]
+    assert flesh_phases[-1].rgb == pytest.approx((78, 53, 36))
+    assert bone_phases[-1].rgb == pytest.approx((229, 220, 200))
+    # First flesh layer under linear: 1/5 of the way from black.
+    expected_first_flesh = tuple(v * 1 / 5 for v in (78, 53, 36))
+    for a, b in zip(flesh_phases[0].rgb, expected_first_flesh):
+        assert abs(a - b) < 1e-6, (
+            f"linear-mode first flesh layer should be 1/5 of way to pure; "
+            f"got {flesh_phases[0].rgb}, expected {expected_first_flesh}"
+        )
+
+
+def test_derive_phases_rejects_bad_interpolation_mode():
+    fil = fstp.Filament("#FF0000", 1.7)
+    with pytest.raises(ValueError, match="interpolation_mode"):
+        fstp.derive_phases(
+            [fil], 0.04, max_thicknesses_mm=[0.20],
+            interpolation_mode='bogus',
         )
 
 
@@ -249,14 +294,18 @@ def test_derive_phases_tonal_range_hits_saturated_endpoints():
         f"got {bone_phases[-1].rgb}"
     )
 
-    # FIRST phase of flesh = 1/5 of the way from black to pure flesh.
-    expected_first_flesh = tuple(v * 1 / 5 for v in (78, 53, 36))
+    # FIRST phase of flesh = scaled-BL fraction of the way from black
+    # to pure flesh.
+    frac_flesh_1 = fstp.layer_opacity(0.04, 1.7) / fstp.layer_opacity(0.20, 1.7)
+    expected_first_flesh = tuple(v * frac_flesh_1 for v in (78, 53, 36))
     for a, b in zip(flesh_phases[0].rgb, expected_first_flesh):
         assert abs(a - b) < 1e-6
 
-    # FIRST phase of bone white = 1/12 of the way from pure flesh to pure bone.
+    # FIRST phase of bone white = scaled-BL fraction of the way from
+    # pure flesh to pure bone white.
+    frac_bone_1 = fstp.layer_opacity(0.04, 4.8) / fstp.layer_opacity(0.48, 4.8)
     expected_first_bone = tuple(
-        (1 / 12) * bw + (11 / 12) * fl
+        frac_bone_1 * bw + (1 - frac_bone_1) * fl
         for fl, bw in zip((78, 53, 36), (229, 220, 200))
     )
     for a, b in zip(bone_phases[0].rgb, expected_first_bone):

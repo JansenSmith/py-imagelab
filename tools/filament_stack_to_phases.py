@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """filament_stack_to_phases — FDM filament-painting wrapper around imagephase.
 
-**Path B' (2026-07-02): HFP-driven, saturated-endpoint linear interpolation.**
-Reads a HueForge `.hfp` file (required) and produces phase-mode inputs
-that `imagephase` expects:
+**HFP-driven, saturated-endpoint interpolation (2026-07-02).** Reads a
+HueForge `.hfp` file (required) and produces phase-mode inputs that
+`imagephase` expects:
 
   • One brush PNG per derived phase (solid color = interpolation between
     previous-filament saturated color and current-filament saturated color).
@@ -13,15 +13,26 @@ that `imagephase` expects:
   • A `phases.json` capturing schedule provenance.
 
 Per-filament phase count is determined by HueForge's `slider_values` from
-the HFP file. Each non-canvas filament produces N phases whose colors
-are LINEARLY INTERPOLATED from the previous filament's saturated color
-to the current filament's saturated color:
+the HFP file. Each non-canvas filament produces N phases whose colors are
+interpolated from the previous filament's saturated color to the current
+filament's saturated color. Two interpolation modes are available via
+`--interpolation-mode`:
 
-    phase_color = (i / N) * filament_pure + (1 - i / N) * under_color
+  1. `scaled-bl` (default): scaled Beer-Lambert curve
+     raw_i = 1 - 10^(-i * layer_height / TD)
+     fraction = raw_i / raw_N              # scaled so top = 1.0
+     Early layers gain color faster (steep at start, flat approaching
+     saturation) — preserves BL's exponential shape.
 
-At layer i = N, phase_color exactly equals filament_pure (the top of that
-filament's stack is treated as fully saturated). At layer i = 1, phase_color
-is 1/N of the way from under_color toward filament_pure.
+  2. `linear`: linear RGB interpolation
+     fraction = i / N
+     Equal-spaced fractions across the range.
+
+Both modes produce identical endpoints (fraction=0 at canvas, fraction=1
+at saturated filament color). They differ in intermediate-layer curve
+shape. Artist visual A/B (2026-07-02) preferred `scaled-bl` for slightly
+tighter alignment with HF preview mid-tones; `linear` remains available
+as an alternate for future comparison work.
 
 For horses sepia HFP (slider_values [0.84, 0.36, 0.16] → reversed to print
 order [0.16, 0.36, 0.84], deltas [0.16, 0.20, 0.48]mm):
@@ -30,20 +41,20 @@ order [0.16, 0.36, 0.84], deltas [0.16, 0.20, 0.48]mm):
     - Bone white:   12 phases, pure flesh → pure bone-white (#E5DCC8)
     - Total: exactly 17 phases spanning full tonal range
 
-**Why interpolation instead of Beer-Lambert:** strict Beer-Lambert at
-HFP-supplied thicknesses produces a palette that bottoms out at "warm
+**Why interpolation instead of strict Beer-Lambert:** strict Beer-Lambert
+at HFP-supplied thicknesses produces a palette that bottoms out at "warm
 medium-dark" (~#3E3730 for horses sepia) because 12 layers of TD-4.8
-bone-white over dark sepia is only 20.6% opaque. HF's own preview
-renders bright pixels near-pure bone-white (~#E3D7C4). Path B' trades
-Beer-Lambert accuracy for tonal-range match with HF's preview. This is
-a HEURISTIC, not physics-accurate. See tools/CITATIONS.md.
+bone-white over dark sepia is only 20.6% opaque. HF's own preview renders
+bright pixels near-pure bone-white (~#E3D7C4). Both interpolation modes
+trade Beer-Lambert end-magnitude accuracy for tonal-range match. These
+are HEURISTICS, not HF-internals-accurate. See tools/CITATIONS.md.
 
 **Why HFP-required (no physics-only fallback):** empirical HF data
 (2026-07-01) disproved every physics-derivable stop criterion. HFP's
 slider_values are treated as authoritative for layer counts.
 
 The `opacity` field in each phase's provenance stores the interpolation
-fraction (i / N) under Path B', NOT a raw Beer-Lambert opacity.
+fraction, NOT a raw Beer-Lambert opacity.
 """
 import argparse
 import json
@@ -197,8 +208,13 @@ class DerivedPhase:
         }
 
 
+INTERPOLATION_MODES = ('scaled-bl', 'linear')
+DEFAULT_INTERPOLATION_MODE = 'scaled-bl'
+
+
 def derive_phases(filaments, layer_height_mm, max_thicknesses_mm,
-                  deltae_fn=deltaE_76):
+                  deltae_fn=deltaE_76,
+                  interpolation_mode=DEFAULT_INTERPOLATION_MODE):
     """Walk filament stack bottom-up. Return a list of DerivedPhase.
 
     Path B' (2026-07-02): HFP-driven, saturated-endpoint linear
@@ -257,6 +273,11 @@ def derive_phases(filaments, layer_height_mm, max_thicknesses_mm,
             f"max_thicknesses_mm has {len(max_thicknesses_mm)} entries but "
             f"there are {len(filaments)} filaments; expected one per filament"
         )
+    if interpolation_mode not in INTERPOLATION_MODES:
+        raise ValueError(
+            f"interpolation_mode must be one of {INTERPOLATION_MODES}, "
+            f"got {interpolation_mode!r}"
+        )
 
     canvas_rgb = filaments[0].rgb
     phases = []
@@ -280,13 +301,21 @@ def derive_phases(filaments, layer_height_mm, max_thicknesses_mm,
         if n_layers > 1000:
             n_layers = 1000
 
+        # Precompute for scaled-bl mode: raw BL opacity at max thickness
+        # is the denominator that scales each layer's opacity so the top
+        # layer reaches fraction 1.0 (saturated).
+        if interpolation_mode == 'scaled-bl':
+            raw_opacity_max = layer_opacity(max_thickness, fil.td)
+
         for intra in range(1, n_layers + 1):
             thickness = intra * layer_height_mm
-            fraction = intra / n_layers
 
-            # Linear RGB interpolation: at intra=n_layers, phase_color
-            # equals filament_pure (saturated); at intra=1, it's 1/N of
-            # the way from under_rgb to pure.
+            if interpolation_mode == 'scaled-bl':
+                raw_opacity_i = layer_opacity(thickness, fil.td)
+                fraction = min(raw_opacity_i / raw_opacity_max, 1.0)
+            else:  # 'linear'
+                fraction = intra / n_layers
+
             layer_rgb = tuple(
                 fraction * f + (1.0 - fraction) * u
                 for f, u in zip(fil.rgb, under_rgb)
@@ -523,6 +552,18 @@ def get_arg_parser():
         help=f"Output directory (default: {DEFAULT_OUT_DIR})",
     )
     parser.add_argument(
+        '--interpolation-mode', default=DEFAULT_INTERPOLATION_MODE,
+        choices=INTERPOLATION_MODES,
+        help=f"How phase colors are interpolated between the previous "
+             f"filament's saturated color and the current filament's "
+             f"saturated color. 'scaled-bl' (default) uses a scaled "
+             f"Beer-Lambert curve — steep gain at first, flat approaching "
+             f"saturation. 'linear' uses equal-spaced RGB fractions. Both "
+             f"produce identical endpoints (canvas → saturated filament); "
+             f"they differ in intermediate-layer curve shape. Artist visual "
+             f"A/B 2026-07-02 preferred scaled-bl for horses sepia.",
+    )
+    parser.add_argument(
         '--nozzle-mm', type=float, default=None,
         help="Nozzle diameter in mm (e.g. 0.4). When supplied, F8 derives a "
              "per-phase radius schedule (smallest features on top phase) and "
@@ -689,11 +730,12 @@ def run():
               file=sys.stderr)
         sys.exit(1)
 
-    # Derive phases (Path B: HFP-driven, requires max_thicknesses_mm).
+    # Derive phases (HFP-driven, requires max_thicknesses_mm).
     try:
         phases = derive_phases(
             args.filaments, args.layer_height,
             max_thicknesses_mm=args._hfp_max_thicknesses,
+            interpolation_mode=args.interpolation_mode,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
