@@ -55,32 +55,48 @@ Bibliography for `tools/` calibration defaults. Future maintainers extend this r
 
 **Superseded 2026-07-02 by Path B.** The old per-layer ΔE convergence check (which used this threshold) was buggy — fired after ~2 layers of flesh on horses sepia, killing the palette. Path B drops it entirely and records EVERY iterated layer, giving a per-layer HF-aligned palette.
 
-## Path B' — saturated-endpoint linear interpolation (2026-07-02)
+## Saturated-endpoint interpolation (2026-07-02)
 
-**Decision:** `derive_phases` interpolates each filament's phase colors linearly from the previous filament's saturated color to the current filament's saturated pure color, across the HFP-supplied layer count.
+**Decision:** `derive_phases` interpolates each filament's phase colors from the previous filament's saturated color to the current filament's saturated pure color, across the HFP-supplied layer count. Two curve shapes selectable via `--interpolation-mode`:
 
+**Mode: `scaled-bl` (default)** — scaled Beer-Lambert curve:
 ```
-for layer i in 1..N:
-    fraction = i / N
-    phase_color = fraction * filament_pure + (1 - fraction) * under_color
+raw_opacity_i = 1 - 10^(-i * layer_height / TD)
+raw_opacity_N = 1 - 10^(-N * layer_height / TD)
+fraction     = raw_opacity_i / raw_opacity_N       # scaled so top = 1.0
+phase_color  = fraction * filament_pure + (1 - fraction) * under_color
+```
+Steep gain at early layers (Beer-Lambert's exponential shape), flat approaching saturation.
+
+**Mode: `linear`** — equal-spaced RGB fractions:
+```
+fraction = i / N
+phase_color = fraction * filament_pure + (1 - fraction) * under_color
 ```
 
-At layer i = N, phase_color = filament_pure. At layer i = 1, phase_color is 1/N of the way from under toward pure.
+Both modes produce IDENTICAL endpoints: at layer i = N, phase_color = filament_pure; at canvas, phase_color = filaments[0].rgb. They differ only in intermediate-layer curve shape.
 
 For horses sepia (17 phases from HFP): 5 flesh phases interpolate black → pure flesh; 12 bone-white phases interpolate pure flesh → pure bone-white. Palette spans `#000000` through `#4E3524` (pure flesh) to `#E5DCC8` (pure bone-white) — matching HF's preview tonal range.
 
-**Why this is a heuristic and not physics:**
+**Why interpolation instead of strict Beer-Lambert:**
 
 Strict Beer-Lambert at HFP-supplied thicknesses produces a palette that bottoms out at ~#3E3730 for horses (12 layers of TD-4.8 bone-white over dark sepia is only 20.6% opaque). HF's own preview renders bright pixels at ~#E3D7C4 (near-pure bone-white). The ~70% brightness gap means Beer-Lambert-per-HFP-layer doesn't produce the palette HF's actual per-pixel algorithm renders.
 
 We DO NOT know what HF uses internally. HF's per-pixel algorithm varies both stack HEIGHT and filament COMPOSITION per pixel — bright pixels probably get only bone-white deposited (no black or flesh underneath) and reach near-pure bone-white color; dark pixels get only black. The palette range of a HF-rendered print is the range across ALL per-pixel compositions.
 
-Rather than reimplement HF's per-pixel logic (which would be Path C — significant reinvention, artist flagged as maybe-nonsense), Path B' assumes each filament's HFP-supplied thickness "reaches saturation" at the top layer. This is a MODELING SHORTCUT that captures the desired tonal endpoints without claiming physics accuracy.
+Rather than reimplement HF's per-pixel logic (Path C — significant reinvention, artist flagged as maybe-nonsense), the interpolation modes assume each filament's HFP-supplied thickness "reaches saturation" at the top layer. This is a MODELING SHORTCUT that captures the desired tonal endpoints without claiming physics accuracy.
+
+**Why both modes are shipped:**
+
+Artist visual A/B at 25 gens/phase on horses sepia (2026-07-02) preferred `scaled-bl` for slightly tighter mid-tone alignment with HF's Color Match preview (`luminance_method=6` with Color Core = Mesh Core). Both modes converged the same match% (~56.3-56.5%). Match difference was small enough that scaled-bl's edge was tentative rather than decisive; `linear` remains available as an alternate for future comparison work — the full-quality longer-run A/B is a followup research task.
+
+**Artist's HF configuration for the reference comparison:**
+
+The Path B'' A/B was against HueForge in **Color Match mode** (`luminance_method=6`) with Color Core matched to Mesh Core (filament library entries matched to explicitly-chosen swatches). This is the HF configuration where our F7 output has the best shot at approximating HF's rendering; other modes (Standard, Color Aware) apply per-pixel luminance mapping that we can't reproduce without Path C-style image-aware logic.
 
 **Alternative heuristics considered but NOT chosen:**
 
-- **Scaled Beer-Lambert** (compute raw opacity, then scale so opacity_at_N = 1.0). Same endpoints, different intermediate curve (exponential rather than linear). Held as a fallback if visual A/B shows linear interpolation looks poor.
-- **HF color-core screenshot sampling**: exact palette but messy (requires screenshot capture + color sampling). Deferred as `[lo/lo]` improvement if the linear heuristic proves inadequate for some future piece.
+- **HF color-core screenshot sampling**: exact palette but messy (requires screenshot capture + color sampling). Deferred as `[lo/lo]` improvement if both interpolation modes prove inadequate for some future piece.
 - **Path C (reimplement HF's per-pixel algorithm)**: multi-hour reinvention; explicitly out of scope.
 
 Documented as a heuristic; not claimed as HF-internal-algorithm-accurate.

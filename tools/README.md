@@ -36,20 +36,22 @@ python tools/filament_stack_to_phases.py \
 | `--layer-height <mm>` | (from HFP) | Overrides the HFP `layer_height` if supplied. |
 | `--filament <hex>:<TD>` (repeatable) | (from HFP) | Overrides the HFP `filament_set` if supplied. |
 | `--out-dir <path>` | `./phases_out/` | Where to write brushes, init_canvas, phase_run.sh, phases.json. |
+| `--interpolation-mode <mode>` | `scaled-bl` | Curve for intermediate phase colors. `scaled-bl` (default) uses scaled Beer-Lambert (steep early, flat late). `linear` uses equal-spaced fractions. Both produce identical endpoints. |
 | `--nozzle-mm <float>` | OFF | When supplied, activates the nozzle-derived radius schedule (F8). Generates per-phase `--phase-max-radius` + `--phase-min-radius` flags in `phase_run.sh`. |
 | `--print-max-dim-mm <float>` | `242.0` | Physical max dimension of the printed piece in mm (longest side, orientation-independent). Default is the artist's most common max-dim. |
 | `--tower-safety-factor <float>` | `3.0` | Multiplier on `--nozzle-mm` yielding the topmost-phase minimum reliable tower diameter. See `CITATIONS.md`. |
 | `--run` | OFF | After generation, invoke `bash phase_run.sh` automatically. |
 
-### How phases get derived (Path B' — HFP-driven, saturated-endpoint interpolation, 2026-07-02)
+### How phases get derived (HFP-driven, saturated-endpoint interpolation, 2026-07-02)
 
-Phase derivation reads HF's `slider_values` from the HFP file to determine layer counts per filament, then produces phase colors by **linear interpolation from the previous filament's saturated color to the current filament's saturated pure color**:
+Phase derivation reads HF's `slider_values` from the HFP file to determine per-filament layer counts, then produces phase colors by **interpolation from the previous filament's saturated color to the current filament's saturated pure color**. **Every layer becomes one phase.**
 
-```
-phase_color = (i / N) * filament_pure + (1 - i / N) * under_color
-```
+Two curve shapes selectable via `--interpolation-mode`:
 
-At layer i = N, phase_color = filament_pure. At layer i = 1, phase_color is 1/N of the way from under toward pure. **Every layer becomes one phase.**
+- **`scaled-bl` (default)** — scaled Beer-Lambert curve. Early layers gain color faster; later layers approach saturation slowly. Preserves BL's exponential shape while forcing endpoints to canvas → saturated filament.
+- **`linear`** — equal-spaced RGB fractions (`fraction = i / N`).
+
+Both modes produce identical endpoints (phase 1 = canvas, phase N = pure filament); they differ in intermediate-layer curve shape.
 
 For horses sepia (HFP slider_values [0.84, 0.36, 0.16] → reversed to print order [0.16, 0.36, 0.84]):
 
@@ -63,9 +65,9 @@ For horses sepia (HFP slider_values [0.84, 0.36, 0.16] → reversed to print ord
 
 Strict Beer-Lambert at HFP-supplied thicknesses produces a palette that bottoms out at ~#3E3730 for horses (12 layers of TD-4.8 bone-white over dark sepia is only 20.6% opaque). HF's own preview renders bright pixels at ~#E3D7C4 (near-pure bone-white). The Beer-Lambert palette doesn't span the tonal range HF's actual per-pixel algorithm produces.
 
-Path B' treats each filament's HFP-supplied thickness as "reaches saturation at the top layer" and interpolates the intermediate layers linearly. This is a HEURISTIC — not HF-internal-accurate, but produces the palette range imagephase needs to reproduce HF-preview-looking output.
+Both interpolation modes treat each filament's HFP-supplied thickness as "reaches saturation at the top layer" and interpolate the intermediate layers along either a scaled Beer-Lambert curve or a linear curve. These are HEURISTICS — not HF-internal-accurate, but produce the palette range imagephase needs to reproduce HF-preview-looking output.
 
-We do NOT know what HF uses internally. HF's per-pixel algorithm varies both stack height and filament composition per pixel. See `CITATIONS.md` "Path B' — saturated-endpoint linear interpolation" section for the full rationale.
+We do NOT know what HF uses internally. HF's per-pixel algorithm varies both stack height and filament composition per pixel. See `CITATIONS.md` "Saturated-endpoint interpolation" section for the full rationale.
 
 ### Why HFP is required (background)
 
