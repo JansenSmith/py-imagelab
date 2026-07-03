@@ -41,25 +41,39 @@ python tools/filament_stack_to_phases.py \
 | `--tower-safety-factor <float>` | `3.0` | Multiplier on `--nozzle-mm` yielding the topmost-phase minimum reliable tower diameter. See `CITATIONS.md`. |
 | `--run` | OFF | After generation, invoke `bash phase_run.sh` automatically. |
 
-### How phases get derived (Path B — HFP-driven, 2026-07-02)
+### How phases get derived (Path B' — HFP-driven, saturated-endpoint interpolation, 2026-07-02)
 
-Phase derivation reads HF's `slider_values` from the HFP file and iterates each filament to that exact thickness. **Every iterated layer becomes one phase.** No JND-skip; no opacity-ceiling; no per-layer convergence check.
+Phase derivation reads HF's `slider_values` from the HFP file to determine layer counts per filament, then produces phase colors by **linear interpolation from the previous filament's saturated color to the current filament's saturated pure color**:
+
+```
+phase_color = (i / N) * filament_pure + (1 - i / N) * under_color
+```
+
+At layer i = N, phase_color = filament_pure. At layer i = 1, phase_color is 1/N of the way from under toward pure. **Every layer becomes one phase.**
 
 For horses sepia (HFP slider_values [0.84, 0.36, 0.16] → reversed to print order [0.16, 0.36, 0.84]):
 
 1. Start with the bottom filament's pure color as `canvas` (the piece backing is assumed to fully saturate the bottom color).
 2. Black canvas: max_thickness = 0.16mm (skipped; canvas absorbs it).
-3. Flesh: max_thickness = 0.36 - 0.16 = 0.20mm → **5 layers @ 0.04mm.** Each layer's color computed via cumulative Beer-Lambert (`T = 10^(-thickness/TD)`, `opacity = 1 - T`, `C_out = C_filament * opacity + C_under * T`) with `under_rgb = black canvas`. All 5 layer colors recorded.
-4. Bone White: max_thickness = 0.84 - 0.36 = 0.48mm → **12 layers.** `under_rgb = actual top color of flesh stack` (not last recorded phase — Path B fixes this to use the true top-of-stack color). All 12 layer colors recorded.
-5. Total: **exactly 17 phases** (5 + 12), colors matching HF's per-layer prediction.
+3. Flesh: max_thickness = 0.20mm → **5 phases** interpolating black → pure flesh (`#4E3524`). Phase 5 = pure flesh.
+4. Bone White: max_thickness = 0.48mm → **12 phases** interpolating pure flesh → pure bone-white (`#E5DCC8`). Phase 17 = pure bone-white.
+5. Total: **exactly 17 phases** spanning canvas color through saturated flesh to saturated bone-white — matches HF's preview tonal range.
+
+### Why interpolation instead of Beer-Lambert
+
+Strict Beer-Lambert at HFP-supplied thicknesses produces a palette that bottoms out at ~#3E3730 for horses (12 layers of TD-4.8 bone-white over dark sepia is only 20.6% opaque). HF's own preview renders bright pixels at ~#E3D7C4 (near-pure bone-white). The Beer-Lambert palette doesn't span the tonal range HF's actual per-pixel algorithm produces.
+
+Path B' treats each filament's HFP-supplied thickness as "reaches saturation at the top layer" and interpolates the intermediate layers linearly. This is a HEURISTIC — not HF-internal-accurate, but produces the palette range imagephase needs to reproduce HF-preview-looking output.
+
+We do NOT know what HF uses internally. HF's per-pixel algorithm varies both stack height and filament composition per pixel. See `CITATIONS.md` "Path B' — saturated-endpoint linear interpolation" section for the full rationale.
 
 ### Why HFP is required (background)
 
-The 2026-07-01 empirical investigation into HF's "good enough" indicator (`art/imagelab-rendering-bugs.md#bug-4`) showed that HF's per-filament stop criterion involves target-image color per pixel — not derivable from physics alone. Attempting to reverse-engineer with a fixed opacity ceiling (or per-layer ΔE threshold) worked for some cases and failed for others.
+The 2026-07-01 empirical investigation into HF's "good enough" indicator (`art/imagelab-rendering-bugs.md#bug-4`) showed that HF's per-filament stop criterion involves target-image color per pixel — not derivable from physics alone.
 
-Since HF has already computed the correct per-filament layer counts for a given target image and written them to the HFP file, the pragmatic answer is: **use HF's own answer**. F7 reads `slider_values` directly. Perfect HF match with no algorithm reinvention.
+Since HF has already computed the correct per-filament layer counts for a given target image and written them to the HFP file, the pragmatic answer is: **use HF's own answer**. F7 reads `slider_values` directly.
 
-Non-HFP fallback deferred as an improvement; typical filament-painting workflow uses HFP so this doesn't affect real usage. See `CITATIONS.md` for the empirical data and reasoning.
+Non-HFP fallback deferred as an improvement; typical filament-painting workflow uses HFP so this doesn't affect real usage.
 
 ### ΔE choice — CIE 1976 (matches Kromacut)
 
