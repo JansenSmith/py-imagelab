@@ -80,6 +80,17 @@ def get_arg_parser():
                         help="""A list of images to use as a brush inside of
                             whatever shape is used"""
                         )
+    parser.add_argument("--brush-mode",
+                        choices=['texture', 'shape'], default='texture',
+                        help="""how brush images interact with the polygon
+                            shape. 'texture' (default): random sub-rect of
+                            brush is sampled and clipped by polygon shape;
+                            polygon defines stroke silhouette. 'shape': full
+                            brush sampled every stroke; polygon mask blend
+                            skipped; brush's own alpha channel defines the
+                            stroke silhouette. Requires --brush-images with
+                            transparency to be visually meaningful."""
+                        )
     parser.add_argument("-s", "--start-canvas",
                         help="""[s]tart with start-canvas instead of a blank
                         canvas. Useful for resuming old runs or just being

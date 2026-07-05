@@ -183,6 +183,7 @@ class CanvasActionDrawShape(CanvasAction):
         brush_image = self.params.get('brush_image')
         brush_sample_rect = self.params.get('brush_sample_rect')
         brush_rotation = self.params.get('brush_rotation', 0)
+        brush_mode = self.params.get('brush_mode', 'texture')
 
         ox, oy = origin
         draw_pos = (pos[0] - ox, pos[1] - oy)
@@ -212,6 +213,25 @@ class CanvasActionDrawShape(CanvasAction):
                 # brush_image, brush_rotation, 1)
                 brush_image = pygame.transform.rotate(
                     brush_image, brush_rotation)
+
+        # brush_mode='shape' path: brush alpha channel drives the stroke
+        # silhouette. Polygon mask blend is skipped so the brush's own
+        # transparent regions map straight through to the canvas.
+        if brush_image and brush_mode == 'shape':
+            shape_surface = pygame.Surface((radius*2, radius*2),
+                                           pygame.SRCALPHA)
+            shape_surface.fill((0, 0, 0, 0))
+            brush_image_size = brush_image.get_size()
+            center_offset = (
+                (radius*2 - brush_image_size[0])/2,
+                (radius*2 - brush_image_size[1])/2,
+            )
+            shape_surface.blit(brush_image, center_offset)
+            if alpha is not None and alpha < 255:
+                shape_surface.set_alpha(alpha)
+            canvas.blit(shape_surface,
+                        (draw_pos[0] - radius, draw_pos[1] - radius))
+            return
 
         shape_surface = pygame.Surface((radius*2, radius*2))
         shape_surface.set_colorkey(color_key)

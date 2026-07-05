@@ -928,6 +928,7 @@ class App:
             'words': self.options.get('words', None),
             'brush_images': self.brush_surfaces,
             'max_radius': max_radius,
+            'brush_mode': self.options.get('brush_mode', 'texture'),
             'child_callback': self.child_callback,
             'score_fn': STRATEGIES.get(
                 self.options.get('compare_strategy', 'euclidean'),
