@@ -543,41 +543,50 @@ class TestDeriveRadiusSchedule:
     """Unit coverage for `derive_radius_schedule`."""
 
     def test_horses_portrait_canonical(self):
-        """Plan §9 acceptance — horses (242mm max-dim, image_max_dim_px=746,
-        nozzle 0.4mm, safety 3.0)."""
+        """2026-07-03 rewrite: mm-anchor-driven schedule.
+        Horses (242mm max-dim, image_max_dim_px=746, nozzle 0.4mm, safety 3.0).
+        pixels_per_mm ≈ 3.083.
+
+        Anchors at (0.0, 0.53, 0.76, 1.0):
+          bottom: 58mm / 40mm sides → 103 / 71 px radii
+          top:     3mm /  3mm sides → 6 / 6 px radii
+
+        For 17-phase horses: exact values verified below.
+        """
         max_r, min_r = fstp.derive_radius_schedule(
-            n_phases=3,
+            n_phases=17,
             image_max_dim_px=746,
             print_max_dim_mm=242.0,
             nozzle_mm=0.4,
             tower_safety_factor=3.0,
         )
-        assert len(max_r) == 3 and len(min_r) == 3
-        # min_radius_top: max(2, ceil(0.4 * 3.0 * (746/242) / 2))
-        #              = max(2, ceil(1.849)) = max(2, 2) = 2
-        assert min_r[-1] == 2
-        # max_radius_phase_0 ≈ ceil(242 * 0.12 * 3.0826) ≈ ceil(89.52) = 90
-        assert max_r[0] == 90
-        # max_radius_phase_N ≈ max(2*3, ceil(242 * 0.025 * 3.0826))
-        #                   ≈ max(6, ceil(18.65)) = max(6, 19) = 19
-        assert max_r[-1] == 19
-        # mid-phase is the linear-interpolation midpoint of 90 → 19
-        assert max_r[1] == round(90 + (19 - 90) * 0.5)  # = 55
-        # min_radius_other = max(2, floor(2 * 0.5)) = max(2, 1) = 2
-        assert min_r[0] == 2
+        assert len(max_r) == 17 and len(min_r) == 17
+        # Bottom phase (i=0, frac=0.0): 58mm max, 40mm min
+        # radius = side/sqrt(3) * pixels_per_mm ≈ 33.5*3.083 = 103; 40/sqrt(3)*3.083 = 71
+        assert max_r[0] == 104  # ceil(58/sqrt(3) * 746/242)
+        assert min_r[0] == 72  # ceil(40/sqrt(3) * 746/242)
+        # Top phase (i=16, frac=1.0): 3mm max, 3mm min → same
+        assert max_r[-1] == 6   # ceil(3/sqrt(3) * 3.083)
+        assert min_r[-1] == 6
 
-    def test_safety_factor_linear_in_min_tower(self):
+    def test_safety_factor_engages_when_top_anchor_below_floor(self):
+        """Safety floor (nozzle * tower_safety_factor / 2) should only
+        engage when a phase's mm-anchor radius falls below it. At default
+        tower_safety_factor=3.0 the floor is ~1.85px which the 3mm top
+        anchor (6px) exceeds, so floor doesn't fire. At extreme
+        tower_safety_factor=10.0 the floor becomes ~6.17px which meets
+        or exceeds the top anchor."""
         _, min_r_3 = fstp.derive_radius_schedule(
-            3, 746, 242.0, 0.4, 3.0,
+            17, 746, 242.0, 0.4, 3.0,
         )
-        _, min_r_6 = fstp.derive_radius_schedule(
-            3, 746, 242.0, 0.4, 6.0,
+        _, min_r_10 = fstp.derive_radius_schedule(
+            17, 746, 242.0, 0.4, 10.0,
         )
-        # Double safety factor → roughly double min_radius_top.
-        # min_top@3 = max(2, ceil(1.849)) = 2
-        # min_top@6 = max(2, ceil(3.699)) = 4
-        assert min_r_3[-1] == 2
-        assert min_r_6[-1] == 4
+        # tower_safety_factor doesn't affect anchor-driven radii until it
+        # exceeds the anchor floor. At factor=3.0 top-min = 6 (anchor);
+        # at factor=10.0 floor = ceil(0.4*10.0*3.083/2) = 7, so top-min = 7.
+        assert min_r_3[-1] == 6
+        assert min_r_10[-1] == 7
 
     def test_landscape_same_as_portrait_when_max_dim_matches(self):
         """Orientation-independence: 746px max-dim should yield same
@@ -610,8 +619,10 @@ class TestDeriveRadiusSchedule:
             1, 746, 242.0, 0.4, 3.0,
         )
         assert len(max_r) == 1 and len(min_r) == 1
-        # Single phase → use top values directly.
-        assert min_r[0] == 2
+        # Single phase → frac=0.0 → bottom anchor values (58mm/40mm).
+        # radius = 40/sqrt(3) * pixels_per_mm ≈ 71 for min, 103 for max.
+        assert min_r[0] == 72
+        assert max_r[0] == 104
 
     def test_rejects_zero_phases(self):
         with pytest.raises(ValueError):

@@ -88,11 +88,28 @@ DEFAULT_TOWER_SAFETY_FACTOR = 3.0  # nozzle_mm × this = min reliable tower
                                     # (community-convergent; see CITATIONS.md).
 MIN_PIXELS_PER_MM = 2.0           # below this: features print too coarsely
 MAX_PIXELS_PER_MM = 5.0           # above this: GA convergence wastefully slow
-RADIUS_FRACTION_PHASE_0 = 0.12    # max-radius of bottom phase = 12% of print
-                                   # max-dim (large coverage strokes).
-RADIUS_FRACTION_PHASE_N = 0.025   # max-radius of top phase = 2.5% of print
-                                   # max-dim (small detail strokes), with a
-                                   # 3×min-radius-top floor for safety.
+RADIUS_FRACTION_PHASE_0 = 0.12    # LEGACY — no longer consumed by
+RADIUS_FRACTION_PHASE_N = 0.025   # derive_radius_schedule. Retained for
+                                   # backward-compat imports; the 2026-07-03
+                                   # rewrite (Bug 5) uses piecewise-linear
+                                   # mm-based anchors instead. See
+                                   # RADIUS_SCHEDULE_ANCHORS_MM below.
+
+# 2026-07-03 (Bug 5 fix, artist-specified): piecewise-linear anchors for
+# the per-phase radius schedule. Each entry is (phase_fraction,
+# max_side_mm, min_side_mm) where phase_fraction is 0.0 at the bottom
+# phase and 1.0 at the top. max_side and min_side are the desired
+# equilateral-triangle SIDE LENGTHS in mm at that phase. Interpolation
+# is linear between consecutive anchors. Rationale + research citations
+# in tools/CITATIONS.md ("Per-phase radius schedule — piecewise-linear
+# mm anchors").
+RADIUS_SCHEDULE_ANCHORS_MM = [
+    # (phase_fraction, max_side_mm, min_side_mm)
+    (0.00, 58.0, 40.0),   # bottom — big coverage strokes; cheat-mode spread OK
+    (0.53, 20.0, 15.0),   # first knee — max shrinks faster than min
+    (0.76, 12.0, 12.0),   # max meets min — no more cheat-mode spread
+    (1.00,  3.0,  3.0),   # top — at min-recognizable-triangle threshold
+]
 
 
 # ---------- color math ----------
@@ -346,22 +363,52 @@ def derive_phases(filaments, layer_height_mm, max_thicknesses_mm,
 
 # ---------- radius schedule (F8) ----------
 
+def _interp_anchors(frac, anchors):
+    """Piecewise-linear interpolation of (max_side_mm, min_side_mm) at
+    phase_fraction `frac` in [0.0, 1.0] across a sorted anchor list.
+    Anchors: list of (phase_frac, max_side_mm, min_side_mm) tuples,
+    sorted by phase_frac. Clamps to endpoint anchors outside the range."""
+    if frac <= anchors[0][0]:
+        return anchors[0][1], anchors[0][2]
+    if frac >= anchors[-1][0]:
+        return anchors[-1][1], anchors[-1][2]
+    for i in range(len(anchors) - 1):
+        f_lo, max_lo, min_lo = anchors[i]
+        f_hi, max_hi, min_hi = anchors[i + 1]
+        if f_lo <= frac <= f_hi:
+            span = f_hi - f_lo
+            t = (frac - f_lo) / span if span > 0 else 0
+            return (
+                max_lo + (max_hi - max_lo) * t,
+                min_lo + (min_hi - min_lo) * t,
+            )
+    return anchors[-1][1], anchors[-1][2]  # unreachable
+
+
 def derive_radius_schedule(n_phases, image_max_dim_px, print_max_dim_mm,
                             nozzle_mm, tower_safety_factor):
     """Per-phase (max_radius, min_radius) lists in pixels.
 
-    Derivation:
-        pixels_per_mm   = image_max_dim_px / print_max_dim_mm
-        min_tower_mm    = nozzle_mm × tower_safety_factor
-        min_radius_top  = max(2, ceil(min_tower_mm × pixels_per_mm / 2))
+    Rewritten 2026-07-03 (Bug 5 fix). Uses piecewise-linear mm-based
+    anchors (`RADIUS_SCHEDULE_ANCHORS_MM`) rather than the legacy
+    print-max-dim-fraction formula. Anchors specify equilateral-triangle
+    SIDE LENGTHS in mm at 4 phase-fraction control points; interpolation
+    is linear between consecutive anchors. Radius = side / √3, converted
+    to pixels via `pixels_per_mm = image_max_dim_px / print_max_dim_mm`.
 
-        max_radius_phase_0 = ceil(print_max_dim_mm × 0.12  × pixels_per_mm)
-        max_radius_phase_N = max(min_radius_top × 3,
-                                 ceil(print_max_dim_mm × 0.025 × pixels_per_mm))
-        # linear-interpolated across n_phases
+    Under this schedule, adaptive-cheat-mode's spread from max to min is
+    active where max ≠ min (early phases) and inactive where max == min
+    (mid-to-top phases). This is deliberate: the artist wants all
+    triangles within a phase to be identically sized for late phases
+    (small enough that further shrinking would go below the min
+    recognizable size ~2.0-2.5mm on Bambu X1C with 0.4mm nozzle).
 
-        min_radius_top   = (above)  — topmost phase
-        min_radius_other = max(2, floor(min_radius_top × 0.5))
+    Args:
+      nozzle_mm, tower_safety_factor: retained as SAFETY FLOOR overrides
+        only. They set the absolute minimum radius (`min_tower_mm/2`) that
+        top-phase radii must not fall below. Under the mm-anchor schedule,
+        this floor rarely engages since the top anchor is 3mm > tower-safety
+        (1.2mm at nozzle=0.4, factor=3), but kept for defensive safety.
 
     Returns (max_radii, min_radii), each a list of length n_phases.
     """
@@ -374,31 +421,26 @@ def derive_radius_schedule(n_phases, image_max_dim_px, print_max_dim_mm,
 
     pixels_per_mm = image_max_dim_px / print_max_dim_mm
     min_tower_mm = nozzle_mm * tower_safety_factor
-    min_radius_top = max(2, math.ceil(min_tower_mm * pixels_per_mm / 2))
+    absolute_min_radius_px = max(2, math.ceil(min_tower_mm * pixels_per_mm / 2))
 
-    max_r_phase_0 = math.ceil(
-        print_max_dim_mm * RADIUS_FRACTION_PHASE_0 * pixels_per_mm
-    )
-    max_r_phase_N = max(
-        min_radius_top * 3,
-        math.ceil(print_max_dim_mm * RADIUS_FRACTION_PHASE_N * pixels_per_mm),
-    )
-
-    if n_phases == 1:
-        max_radii = [max_r_phase_N]
-    else:
-        # Linear interpolation; phase 0 → max_r_phase_0, phase N-1 → max_r_phase_N.
-        max_radii = []
-        for i in range(n_phases):
-            frac = i / (n_phases - 1)
-            r = max_r_phase_0 + (max_r_phase_N - max_r_phase_0) * frac
-            max_radii.append(max(min_radius_top, int(round(r))))
-
-    min_radius_other = max(2, math.floor(min_radius_top * 0.5))
-    if n_phases == 1:
-        min_radii = [min_radius_top]
-    else:
-        min_radii = [min_radius_other] * (n_phases - 1) + [min_radius_top]
+    max_radii = []
+    min_radii = []
+    for i in range(n_phases):
+        frac = i / (n_phases - 1) if n_phases > 1 else 0.0
+        max_side_mm, min_side_mm = _interp_anchors(
+            frac, RADIUS_SCHEDULE_ANCHORS_MM,
+        )
+        # side / sqrt(3) = radius for equilateral triangle
+        max_radius_px = math.ceil(max_side_mm / math.sqrt(3) * pixels_per_mm)
+        min_radius_px = math.ceil(min_side_mm / math.sqrt(3) * pixels_per_mm)
+        # Enforce safety floor.
+        max_radius_px = max(max_radius_px, absolute_min_radius_px)
+        min_radius_px = max(min_radius_px, absolute_min_radius_px)
+        # Ensure min never exceeds max (guards against anchor edge cases).
+        if min_radius_px > max_radius_px:
+            min_radius_px = max_radius_px
+        max_radii.append(max_radius_px)
+        min_radii.append(min_radius_px)
 
     return max_radii, min_radii
 
