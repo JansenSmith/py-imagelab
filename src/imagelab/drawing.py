@@ -26,16 +26,21 @@ def draw_random_circle(canvas, clip_rect=None, max_radius=20, radius=None,
     if brush_image:
         brush_size = brush_image.get_size()
         if brush_mode == 'shape':
+            # Full-brush sample every stroke; the sample rect covers the
+            # entire brush image. Skipping get_random_clip_rect here — its
+            # constrain=True path calls rng.integers(0, 0) when clip == rect,
+            # which numpy rejects.
             sample_size = min(brush_size)
+            params['brush_sample_rect'] = (0, 0, sample_size, sample_size)
         else:
             max_sample_size = max(radius*2, min(brush_size))
             sample_size = rng.integers(radius*2, max_sample_size)
-        params['brush_sample_rect'] = get_random_clip_rect(
-            brush_image.get_rect(),
-            sample_size,
-            sample_size,
-            True
-        )
+            params['brush_sample_rect'] = get_random_clip_rect(
+                brush_image.get_rect(),
+                sample_size,
+                sample_size,
+                True
+            )
         params['brush_rotation'] = rng.integers(1, 361)
 
     ca = CanvasActionDrawShape(params)
@@ -65,16 +70,21 @@ def draw_random_polygon(canvas, edges=None, rotation=None, clip_rect=None,
     if brush_image:
         brush_size = brush_image.get_size()
         if brush_mode == 'shape':
+            # Full-brush sample every stroke; the sample rect covers the
+            # entire brush image. Skipping get_random_clip_rect here — its
+            # constrain=True path calls rng.integers(0, 0) when clip == rect,
+            # which numpy rejects.
             sample_size = min(brush_size)
+            params['brush_sample_rect'] = (0, 0, sample_size, sample_size)
         else:
             max_sample_size = max(radius*2, min(brush_size))
             sample_size = rng.integers(radius*2, max_sample_size)
-        params['brush_sample_rect'] = get_random_clip_rect(
-            brush_image.get_rect(),
-            sample_size,
-            sample_size,
-            True
-        )
+            params['brush_sample_rect'] = get_random_clip_rect(
+                brush_image.get_rect(),
+                sample_size,
+                sample_size,
+                True
+            )
         params['brush_rotation'] = rng.integers(1, 361)
 
     ca = CanvasActionDrawShape(params)

@@ -148,7 +148,8 @@ def test_texture_mode_is_default(observe_rng_and_clip):
 
 
 def test_shape_mode_full_brush_sample(observe_rng_and_clip):
-    """shape mode: sample_size == min(brush_size), no rng draw for sample."""
+    """shape mode: sample_rect covers full brush, no rng draw for sample,
+    no get_random_clip_rect call. Sample rect is fixed (0, 0, brush, brush)."""
     rng_rec, clip_rec = observe_rng_and_clip
     drawing.draw_random_polygon(
         _FakeSurface(),
@@ -156,20 +157,22 @@ def test_shape_mode_full_brush_sample(observe_rng_and_clip):
         brush_images=[_FakeBrush((64, 64))],
         brush_mode='shape',
     )
-    # The sample_size passed into get_random_clip_rect must equal min(brush_size).
-    assert (64, 64) in clip_rec.sample_sizes, (
-        f"expected (64, 64) sample size, got {clip_rec.sample_sizes}"
-    )
     # No rng.integers call for the sample_size — the (2, 64) pattern
     # must be absent (brush_rotation (1, 361) still fires).
     assert (2, 64) not in rng_rec.calls, (
         f"texture-mode sample_size rng call fired in shape mode: "
         f"{rng_rec.calls}"
     )
+    # No get_random_clip_rect call in shape mode — sample rect is set
+    # directly to avoid the constrain=True degenerate-range crash.
+    assert clip_rec.sample_sizes == [], (
+        f"shape mode called get_random_clip_rect: {clip_rec.sample_sizes}"
+    )
 
 
 def test_shape_mode_full_brush_sample_small_radius(observe_rng_and_clip):
-    """shape mode with tiny radius (r=3): sample_size still full brush."""
+    """shape mode with tiny radius (r=3): sample rect still full brush,
+    still no get_random_clip_rect call."""
     _, clip_rec = observe_rng_and_clip
     drawing.draw_random_polygon(
         _FakeSurface(),
@@ -177,11 +180,11 @@ def test_shape_mode_full_brush_sample_small_radius(observe_rng_and_clip):
         brush_images=[_FakeBrush((128, 128))],
         brush_mode='shape',
     )
-    assert (128, 128) in clip_rec.sample_sizes
+    assert clip_rec.sample_sizes == []
 
 
 def test_circle_shape_mode_full_brush_sample(observe_rng_and_clip):
-    """Same behavior for draw_random_circle."""
+    """Same skip-clip-rect behavior for draw_random_circle."""
     _, clip_rec = observe_rng_and_clip
     drawing.draw_random_circle(
         _FakeSurface(),
@@ -189,7 +192,7 @@ def test_circle_shape_mode_full_brush_sample(observe_rng_and_clip):
         brush_images=[_FakeBrush((64, 64))],
         brush_mode='shape',
     )
-    assert (64, 64) in clip_rec.sample_sizes
+    assert clip_rec.sample_sizes == []
 
 
 def test_shape_mode_writes_brush_mode_into_action_params(monkeypatch):
@@ -257,3 +260,65 @@ def test_texture_mode_writes_brush_mode_into_action_params(monkeypatch):
         brush_images=[_FakeBrush((64, 64))],
     )
     assert captured['params'].get('brush_mode') == 'texture'
+
+
+def test_shape_mode_skips_get_random_clip_rect(monkeypatch):
+    """Regression sentinel for the integration bug that hit the dogwood
+    horses test: get_random_clip_rect(constrain=True) calls rng.integers(0, 0)
+    when sample_size == brush_size, which numpy rejects. The shape-mode
+    branch must set brush_sample_rect directly and never call
+    get_random_clip_rect.
+
+    If a future edit re-introduces the call inside the shape-mode branch,
+    the raising monkeypatch below fires and this test fails immediately.
+    """
+    captured = {}
+
+    def _raising_clip_rect(*args, **kwargs):
+        raise AssertionError(
+            "shape mode must NOT call get_random_clip_rect — the "
+            "constrain=True path fails when clip == rect. "
+            f"got args={args!r} kwargs={kwargs!r}"
+        )
+
+    monkeypatch.setattr(
+        rng, "integers", lambda low, high, *a, **kw: int(low)
+    )
+    monkeypatch.setattr(rng, "choice", lambda seq, size=None: seq[0])
+    monkeypatch.setattr(drawing, "get_random_clip_rect", _raising_clip_rect)
+
+    class _CaptureAction:
+        opcode = "s"
+
+        def __init__(self, params):
+            captured['params'] = params
+
+        def run(self, canvas, origin=(0, 0)):
+            return None
+
+    monkeypatch.setattr(drawing, "CanvasActionDrawShape", _CaptureAction)
+
+    # polygon path
+    drawing.draw_random_polygon(
+        _FakeSurface(),
+        max_radius=20,
+        brush_images=[_FakeBrush((64, 64))],
+        brush_mode='shape',
+    )
+    assert captured['params'].get('brush_sample_rect') == (0, 0, 64, 64), (
+        f"expected (0, 0, 64, 64) fixed sample rect, "
+        f"got {captured['params'].get('brush_sample_rect')!r}"
+    )
+
+    # circle path — same bug, same fix
+    captured.clear()
+    drawing.draw_random_circle(
+        _FakeSurface(),
+        max_radius=20,
+        brush_images=[_FakeBrush((64, 64))],
+        brush_mode='shape',
+    )
+    assert captured['params'].get('brush_sample_rect') == (0, 0, 64, 64), (
+        f"expected (0, 0, 64, 64) fixed sample rect, "
+        f"got {captured['params'].get('brush_sample_rect')!r}"
+    )
