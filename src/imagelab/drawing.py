@@ -10,11 +10,13 @@ from imagelab.canvas import CanvasActionDrawText
 
 def draw_random_circle(canvas, clip_rect=None, max_radius=20, radius=None,
                        alpha=None, color=None, color_key=(0, 0, 0), pos=None,
-                       brush_images=None, surface_origin=(0, 0)):
+                       brush_images=None, surface_origin=(0, 0),
+                       min_radius=1):
     """Apply paint to the canvas, return details of the circle."""
 
     (color, pos, radius) = get_random_circle(canvas, clip_rect, max_radius,
-                                             radius, color, pos)
+                                             radius, color, pos,
+                                             min_radius=min_radius)
 
     brush_image = rng.choice(brush_images, size=None) if brush_images else None
 
@@ -42,12 +44,13 @@ def draw_random_circle(canvas, clip_rect=None, max_radius=20, radius=None,
 def draw_random_polygon(canvas, edges=None, rotation=None, clip_rect=None,
                         max_radius=20, radius=None, alpha=None, color=None,
                         color_key=(0, 0, 0), pos=None, max_edges=8,
-                        brush_images=None, surface_origin=(0, 0)):
+                        brush_images=None, surface_origin=(0, 0),
+                        min_radius=1):
     """Apply paint to the canvas, return details of the polygon."""
 
     (color, pos, radius, edges, rotation) = get_random_polygon(
         canvas, edges, rotation, clip_rect, max_radius, radius, color,
-        pos, max_edges)
+        pos, max_edges, min_radius=min_radius)
 
     brush_image = rng.choice(brush_images, size=None) if brush_images else None
 
@@ -76,12 +79,14 @@ def draw_random_polygon(canvas, edges=None, rotation=None, clip_rect=None,
 def draw_random_word(canvas, words, rotation=None, clip_rect=None,
                      max_radius=20, radius=None, alpha=None, color=None,
                      color_key=(0, 0, 0), pos=None,
-                     brush_images=None, surface_origin=(0, 0)):
+                     brush_images=None, surface_origin=(0, 0),
+                     min_radius=1):
     """ Apply paint to the canvas, return details of a random word from
         candidate list """
 
     (color, pos, radius, word, rotation) = get_random_word(
-        canvas, words, rotation, clip_rect, max_radius, radius, color, pos)
+        canvas, words, rotation, clip_rect, max_radius, radius, color, pos,
+        min_radius=min_radius)
 
     brush_image = rng.choice(brush_images, size=None) if brush_images else None
 

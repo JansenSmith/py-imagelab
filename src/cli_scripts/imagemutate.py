@@ -125,8 +125,12 @@ def get_arg_parser():
                              "improves — better art, less pure simulation"
                         )
     parser.add_argument("--min-radius", default=None, type=int,
-                        help="floor for adaptive radius "
-                             "(default: max(radius // 8, 5))"
+                        help="floor for individual stroke radii — "
+                             "the draw path samples radius uniformly "
+                             "from [min-radius, max-radius]. also serves "
+                             "as the floor for adaptive-cheat-mode max "
+                             "shrinkage. default: 1 (draw floor); "
+                             "max(radius // 8, 5) (adaptive-cheat floor)."
                         )
     parser.add_argument("--close-on-exit", default=False,
                         action="store_true",

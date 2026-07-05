@@ -70,7 +70,7 @@ def _child_worker(args):
     (seed_chunk,
      clip_shm_name, clip_shape, clip_dtype,
      target_shm_name, target_shape, target_dtype,
-     shape, words, max_radius, radius, alpha, color, color_key,
+     shape, words, max_radius, min_radius, radius, alpha, color, color_key,
      pos, max_edges, brush_arrays, clip_rect_tuple, surface_origin,
      score_fn_name) = args
 
@@ -122,6 +122,7 @@ def _child_worker(args):
                 img, words, None, clip_rect, max_radius, radius,
                 alpha, color, color_key, pos, brush_images,
                 surface_origin=surface_origin,
+                min_radius=min_radius,
             )
         elif shape in POLYGON_NUM_SIDES or shape == SHAPE_POLYGON:
             num_sides = None if shape == SHAPE_POLYGON else POLYGON_NUM_SIDES[shape]
@@ -129,12 +130,14 @@ def _child_worker(args):
                 img, num_sides, None, clip_rect, max_radius, radius,
                 alpha, color, color_key, pos, max_edges, brush_images,
                 surface_origin=surface_origin,
+                min_radius=min_radius,
             )
         else:
             result = draw_random_circle(
                 img, clip_rect, max_radius, radius, alpha, color,
                 color_key, pos, brush_images,
                 surface_origin=surface_origin,
+                min_radius=min_radius,
             )
 
         score = _score(pygame.surfarray.array3d(img))
@@ -179,6 +182,7 @@ def mutate_evolve(surface, params):
     clip_rect = params.get("clip_rect")
     shape = params.get("shape", SHAPE_CIRCLE)
     max_radius = params.get("max_radius", (clip_rect.width / 2))
+    min_radius = params.get("min_radius", 1)
     radius = params.get("radius")
     max_edges = params.get("max_edges", 8)
     alpha = params.get("alpha", 180)
@@ -238,7 +242,7 @@ def mutate_evolve(surface, params):
             (chunk,
              clip_shm.name, clip_base_array.shape, str(clip_base_array.dtype),
              target_shm.name, target_clipped.shape, str(target_clipped.dtype),
-             resolved_shape, words, max_radius, radius, alpha, color, color_key,
+             resolved_shape, words, max_radius, min_radius, radius, alpha, color, color_key,
              pos, max_edges, brush_arrays, clip_rect_tuple, surface_origin, score_fn_name)
             for chunk in seed_chunks
         ]
@@ -320,6 +324,7 @@ def mutate_evolve(surface, params):
         max_edges,
         child_callback=child_callback,
         brush_images=brush_images,
+        min_radius=min_radius,
     )
 
     # get the list of surfaces
@@ -373,6 +378,7 @@ def morph_surface(
     max_edges=None,
     child_callback=None,
     brush_images=None,
+    min_radius=1,
 ):
     """
     Takes an origin surface (canvas) and creates multiple (count) children.
@@ -406,6 +412,7 @@ def morph_surface(
                 img, words, None, clip_rect,
                 max_radius, radius, alpha, color, color_key, pos, brush_images,
                 surface_origin=surface_origin,
+                min_radius=min_radius,
             )
         elif shape in POLYGON_NUM_SIDES or shape == SHAPE_POLYGON:
             numSides = None if shape == SHAPE_POLYGON else POLYGON_NUM_SIDES[shape]
@@ -413,12 +420,14 @@ def morph_surface(
                 img, numSides, None, clip_rect,
                 max_radius, radius, alpha, color, color_key, pos, max_edges, brush_images,
                 surface_origin=surface_origin,
+                min_radius=min_radius,
             )
         else:
             result = draw_random_circle(
                 img, clip_rect,
                 max_radius, radius, alpha, color, color_key, pos, brush_images,
                 surface_origin=surface_origin,
+                min_radius=min_radius,
             )
 
         if child_callback:

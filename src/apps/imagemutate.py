@@ -920,6 +920,18 @@ class App:
         self._current_radius = max_radius
         self._current_children = children
 
+        # min_radius option is the floor for individual stroke radii within
+        # this generation. When --min-radius is unset, pass 1 to preserve the
+        # legacy draw-path lower bound. Clamp to current max so degenerate
+        # ranges (e.g. adaptive-cheat shrinking max below the requested min)
+        # collapse to a fixed size rather than producing an empty
+        # rng.integers interval.
+        min_radius_opt = self.options.get('min_radius')
+        if min_radius_opt is None:
+            min_radius = 1
+        else:
+            min_radius = max(1, min(min_radius_opt, max_radius))
+
         mutator_params = {
             'target': self.target_surface,
             'clip_rect': self._clip_rect,
@@ -928,6 +940,7 @@ class App:
             'words': self.options.get('words', None),
             'brush_images': self.brush_surfaces,
             'max_radius': max_radius,
+            'min_radius': min_radius,
             'child_callback': self.child_callback,
             'score_fn': STRATEGIES.get(
                 self.options.get('compare_strategy', 'euclidean'),
